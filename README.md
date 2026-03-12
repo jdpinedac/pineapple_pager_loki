@@ -214,13 +214,13 @@ Loki includes a full web UI at `http://<pager-ip>:8000` with Dashboard, Hosts, A
 
 Loki ships with 5 themes, each with custom animations, colors, fonts, menus, and commentary personality. All themes support portrait and landscape orientations. See [THEME_README.md](THEME_README.md) for full details and a guide to creating custom themes.
 
-| Theme | Display Name | Description |
-|-------|-------------|-------------|
-| `loki` | LOKI | Default theme with Norse trickster personality |
-| `bjorn` | BJORN | Original Bjorn Viking theme by infinition |
-| `clown` | ClownSec | CLOWNSEC jester theme with circus commentary |
-| `pirate` | Cap'n Plndr | Pirate theme with seafaring personality |
-| `knight` | Sir Haxalot | Medieval knight theme with chivalric personality |
+| Theme | Display Name | Creator | Description |
+|-------|-------------|---------|-------------|
+| `loki` | LOKI | brAinphreAk | Default theme with Norse trickster personality |
+| `bjorn` | BJORN | infinition | Original Bjorn Viking theme |
+| `clown` | ClownSec | brAinphreAk | CLOWNSEC jester theme with circus commentary |
+| `pirate` | Cap'n Plndr | brAinphreAk | Pirate theme with seafaring personality |
+| `knight` | Sir Haxalot | Zombie Joe | Medieval knight theme with chivalric personality |
 
 <p align="center">
   <img src="screenshots/26-loki-theme-landscape.png" width="240" alt="Loki">
