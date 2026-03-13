@@ -129,7 +129,7 @@ class NetworkScanner:
         except Exception:
             return False
 
-    def update_netkb(self, netkbfile, netkb_data, alive_macs, scanned_network=None, service_versions=None):
+    def update_netkb(self, netkbfile, netkb_data, alive_macs, scanned_network=None, service_versions=None, ping_fallback=False):
         with self.lock:
             try:
                 netkb_entries = {}
@@ -176,24 +176,25 @@ class NetworkScanner:
                                 netkb_entries[mac][action] = row.get(action, "")
 
                 # Ping fallback: check existing hosts not detected by nmap
-                # Only check hosts within the scanned network range
-                for mac, data in netkb_entries.items():
-                    if mac not in alive_macs and mac != "STANDALONE":
-                        for ip in data['IPs']:
-                            # Skip blacklisted IPs (including this device)
-                            if self.blacklistcheck and ip in self.ip_scan_blacklist:
-                                continue
-                            # Skip IPs not in the scanned network range
-                            if scanned_network:
-                                try:
-                                    if ipaddress.IPv4Address(ip) not in scanned_network:
-                                        continue
-                                except:
+                # Only runs during initial host discovery, not on every incremental write
+                if ping_fallback:
+                    for mac, data in netkb_entries.items():
+                        if mac not in alive_macs and mac != "STANDALONE":
+                            for ip in data['IPs']:
+                                # Skip blacklisted IPs (including this device)
+                                if self.blacklistcheck and ip in self.ip_scan_blacklist:
                                     continue
-                            if self.ping_host(ip):
-                                self.logger.info(f"Ping fallback: {ip} ({mac}) is alive")
-                                alive_macs.add(mac)
-                                break
+                                # Skip IPs not in the scanned network range
+                                if scanned_network:
+                                    try:
+                                        if ipaddress.IPv4Address(ip) not in scanned_network:
+                                            continue
+                                    except:
+                                        continue
+                                if self.ping_host(ip):
+                                    self.logger.info(f"Ping fallback: {ip} ({mac}) is alive")
+                                    alive_macs.add(mac)
+                                    break
 
                 ip_to_mac = {}
 
@@ -638,13 +639,14 @@ class NetworkScanner:
                 data.append([mac, ip, hostname, ports])
             return data
 
-        def _write_netkb_incremental(self, service_versions=None):
+        def _write_netkb_incremental(self, service_versions=None, ping_fallback=False):
             """Write current scan state to netkb and update livestatus counters."""
             netkb_data = self._build_netkb_data()
             alive_macs = set(self.ip_data.mac_list)
             self.outer_instance.update_netkb(
                 self.netkbfile, netkb_data, alive_macs,
-                self.network, service_versions=service_versions
+                self.network, service_versions=service_versions,
+                ping_fallback=ping_fallback
             )
             # Update livestatus so dashboard counters refresh too
             try:
@@ -680,7 +682,7 @@ class NetworkScanner:
             total_ips = len(self.ip_data.ip_list)
             sd.lokistatustext2 = f"Found {total_ips} hosts"
             self.logger.info(f"Found {total_ips} hosts")
-            self._write_netkb_incremental()
+            self._write_netkb_incremental(ping_fallback=True)
 
             # Phase 2: Port scanning
             sd.lokistatustext2 = f"Scanning ports on {total_ips} hosts..."
@@ -698,7 +700,7 @@ class NetworkScanner:
             alive_ips = set(self.ip_data.ip_list)
 
             sd.lokistatustext2 = f"{len(self.all_ports)} open ports found"
-            self._write_netkb_incremental()
+            self._write_netkb_incremental(ping_fallback=True)
 
             if self._should_stop():
                 return self.ip_data, self.open_ports, self.all_ports, self.csv_result_file, self.netkbfile, alive_ips
@@ -731,14 +733,43 @@ class NetworkScanner:
 
             Uses multiple NSE scripts instead of -sV because the MIPS nmap build
             crashes on -sV due to missing OpenSSL DTLS support.
+            Skips hosts that already have service info in the netkb.
             Results are written to netkb after each host completes.
             """
             sd = self.outer_instance.shared_data
             hosts_with_ports = [(ip, self.open_ports.get(ip, [])) for ip in self.ip_data.ip_list]
             hosts_with_ports = [(ip, ports) for ip, ports in hosts_with_ports if ports]
-            total = len(hosts_with_ports)
 
-            for i, (ip, ports) in enumerate(hosts_with_ports):
+            # Load existing port+service info from netkb to skip hosts with unchanged ports
+            existing_ports = {}  # ip -> set of known ports
+            try:
+                if os.path.exists(self.netkbfile):
+                    with open(self.netkbfile, 'r') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            svc = row.get('Services', '').strip()
+                            known_ports = set(p.strip() for p in row.get('Ports', '').split(';') if p.strip())
+                            if svc and known_ports:
+                                for ip in row.get('IPs', '').split(';'):
+                                    ip = ip.strip()
+                                    if ip:
+                                        existing_ports[ip] = known_ports
+            except Exception as e:
+                self.logger.warning(f"Could not read existing service info from netkb: {e}")
+
+            # Skip hosts where ports haven't changed since last fingerprint
+            hosts_to_scan = []
+            for ip, ports in hosts_with_ports:
+                current_ports = set(str(p) for p in ports)
+                if ip in existing_ports and current_ports == existing_ports[ip]:
+                    continue  # Same ports, already fingerprinted
+                hosts_to_scan.append((ip, ports))
+            skipped = len(hosts_with_ports) - len(hosts_to_scan)
+            if skipped:
+                self.logger.info(f"Service detection: skipping {skipped} hosts with unchanged ports")
+            total = len(hosts_to_scan)
+
+            for i, (ip, ports) in enumerate(hosts_to_scan):
                 if self._should_stop():
                     break
                 port_str = ','.join(str(p) for p in sorted(ports))
@@ -923,7 +954,7 @@ class NetworkScanner:
         def _run_os_detection(self):
             """Run nmap -O on hosts with open ports for OS fingerprinting.
 
-            Skips hosts that already have OS info from service detection.
+            Skips hosts that already have OS info from the netkb or service detection.
             Results merge into service_versions[ip]['os'] and flow into netkb.
             """
             import re
@@ -931,8 +962,32 @@ class NetworkScanner:
             hosts_with_ports = [(ip, self.open_ports.get(ip, [])) for ip in self.ip_data.ip_list]
             hosts_with_ports = [(ip, ports) for ip, ports in hosts_with_ports if ports]
 
-            # Run on all hosts with open ports — combines with banner-inferred OS
-            hosts_to_scan = hosts_with_ports
+            # Load existing OS info from netkb to skip hosts already fingerprinted
+            existing_os = {}
+            try:
+                if os.path.exists(self.netkbfile):
+                    with open(self.netkbfile, 'r') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            os_val = row.get('OS', '').strip()
+                            if os_val:
+                                for ip in row.get('IPs', '').split(';'):
+                                    ip = ip.strip()
+                                    if ip:
+                                        existing_os[ip] = os_val
+            except Exception as e:
+                self.logger.warning(f"Could not read existing OS info from netkb: {e}")
+
+            # Also check banner-inferred OS from current scan's service detection
+            for ip, sv in self.service_versions.items():
+                if sv.get('os'):
+                    existing_os[ip] = sv['os']
+
+            # Skip hosts that already have OS info
+            hosts_to_scan = [(ip, ports) for ip, ports in hosts_with_ports if ip not in existing_os]
+            skipped = len(hosts_with_ports) - len(hosts_to_scan)
+            if skipped:
+                self.logger.info(f"OS detection: skipping {skipped} hosts with existing OS info")
 
             total = len(hosts_to_scan)
             if total == 0:
@@ -953,6 +1008,12 @@ class NetworkScanner:
                     # Parse output even on non-zero exit — nmap -O may produce
                     # sendto permission warnings (non-zero rc) but still detect OS
                     self._parse_os_output(ip, result.stdout)
+                    # Mark host as attempted even if no OS was detected, so we don't retry
+                    if ip not in self.service_versions or not self.service_versions.get(ip, {}).get('os'):
+                        if ip not in self.service_versions:
+                            self.service_versions[ip] = {}
+                        if not self.service_versions[ip].get('os'):
+                            self.service_versions[ip]['os'] = 'Unknown'
                 except subprocess.TimeoutExpired:
                     self.logger.warning(f"OS detection timed out for {ip}")
                 except Exception as e:
