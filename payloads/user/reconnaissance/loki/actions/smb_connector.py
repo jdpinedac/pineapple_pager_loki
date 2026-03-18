@@ -83,16 +83,14 @@ class SMBConnector:
         self.shared_data = shared_data
         self.scan = self._load_csv_filtered(shared_data.netkbfile, "445")
 
-        self.users = open(shared_data.usersfile, "r").read().splitlines()
-        self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+        with open(shared_data.usersfile, "r") as f:
+            self.users = f.read().splitlines()
+        with open(shared_data.passwordsfile, "r") as f:
+            self.passwords = f.read().splitlines()
 
         self.lock = threading.Lock()
-        self.smbfile = shared_data.smbfile
-        # If the file doesn't exist, it will be created
-        if not os.path.exists(self.smbfile):
-            logger.debug(f"Creating {self.smbfile}")
-            with open(self.smbfile, "w") as f:
-                f.write("MAC Address,IP Address,Hostname,Share,User,Password,Port\n")
+        # Credential file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.results = []  # List to store results temporarily
         self.queue = Queue()
         self.progress_lock = threading.Lock()
@@ -136,10 +134,10 @@ class SMBConnector:
                 conn.listPath(share_name, '/', timeout=10)
                 conn.close()
                 return True  # Guest access allowed
-            except:
+            except Exception:
                 conn.close()
                 return False
-        except:
+        except Exception:
             return False
 
     def _smb_connect_inner(self, adresse_ip, user, password):
@@ -171,7 +169,7 @@ class SMBConnector:
         except Exception as e:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
             return []
 
@@ -234,7 +232,7 @@ class SMBConnector:
             smb_url = f'smb://{user}:{password}@{adresse_ip}/'
             command = f'{smb2_bin} "{smb_url}"'
             try:
-                stdout, stderr, returncode = subprocess_with_timeout(command, timeout=60)
+                stdout, stderr, returncode = subprocess_with_timeout(command, timeout=60, shell=True)
                 output = stdout.decode('utf-8', errors='ignore')
                 if "Number of shares:" in output:
                     shares = self.parse_smb2_shares(output)
@@ -257,7 +255,7 @@ class SMBConnector:
         """
         command = f'smbclient -L //{adresse_ip} -U {user}%{password}'
         try:
-            stdout, stderr, returncode = subprocess_with_timeout(command, timeout=60)
+            stdout, stderr, returncode = subprocess_with_timeout(command, timeout=60, shell=True)
             if b"Sharename" in stdout:
                 shares = self.parse_smbclient_shares(stdout.decode())
                 return shares
@@ -382,11 +380,11 @@ class SMBConnector:
                     if shares:
                         logger.info(f"Server {adresse_ip} allows guest/anonymous access")
                         return True
-                except:
+                except Exception:
                     pass
                 try:
                     conn.close()
-                except:
+                except Exception:
                     pass
         except Exception as e:
             logger.debug(f"Guest access check failed for {adresse_ip}: {e}")
@@ -423,7 +421,7 @@ class SMBConnector:
                             self.guest_shares.add(share.name)
                             with self.lock:
                                 self.results.append([mac_address, adresse_ip, hostname, share.name, "guest", "", port])
-                        except:
+                        except Exception:
                             pass
                     conn.close()
                     if self.guest_shares:
@@ -547,36 +545,36 @@ class SMBConnector:
         """
         expected_header = "MAC Address,IP Address,Hostname,Share,User,Password,Port"
 
-        if not os.path.exists(self.smbfile):
+        if not os.path.exists(self.shared_data.smbfile):
             # File doesn't exist, create with header
-            with open(self.smbfile, 'w', newline='') as f:
+            with open(self.shared_data.smbfile, 'w', newline='') as f:
                 f.write(expected_header + '\n')
             return
 
         # File exists, check if it has header
-        with open(self.smbfile, 'r', newline='') as f:
+        with open(self.shared_data.smbfile, 'r', newline='') as f:
             first_line = f.readline().strip()
 
         if first_line == expected_header:
             return  # Header already present
 
         # Header missing - need to prepend it
-        with open(self.smbfile, 'r', newline='') as f:
+        with open(self.shared_data.smbfile, 'r', newline='') as f:
             existing_content = f.read()
 
-        with open(self.smbfile, 'w', newline='') as f:
+        with open(self.shared_data.smbfile, 'w', newline='') as f:
             f.write(expected_header + '\n')
             if existing_content:
                 f.write(existing_content)
 
-        logger.info(f"Added missing header to {self.smbfile}")
+        logger.info(f"Added missing header to {self.shared_data.smbfile}")
 
     def save_results(self):
         """
         Save the results of successful connection attempts to a CSV file.
         """
         self._ensure_header()  # Always ensure header exists before appending
-        with open(self.smbfile, 'a', newline='') as f:
+        with open(self.shared_data.smbfile, 'a', newline='') as f:
             writer = csv.writer(f)
             for row in self.results:
                 writer.writerow(row)
@@ -588,8 +586,8 @@ class SMBConnector:
         """
         rows = []
         header = None
-        if os.path.exists(self.smbfile):
-            with open(self.smbfile, 'r', newline='') as f:
+        if os.path.exists(self.shared_data.smbfile):
+            with open(self.shared_data.smbfile, 'r', newline='') as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 seen = set()
@@ -599,7 +597,7 @@ class SMBConnector:
                         seen.add(key)
                         rows.append(row)
 
-        with open(self.smbfile, 'w', newline='') as f:
+        with open(self.shared_data.smbfile, 'w', newline='') as f:
             writer = csv.writer(f)
             if header:
                 writer.writerow(header)

@@ -19,6 +19,7 @@ import time
 import csv
 import logging
 import subprocess
+import threading
 from logger import Logger
 
 logger = Logger(name="shared.py", level=logging.INFO)
@@ -26,6 +27,7 @@ logger = Logger(name="shared.py", level=logging.INFO)
 class SharedData:
     """Shared data between the different modules."""
     def __init__(self):
+        self._csv_lock = threading.Lock()  # Protects netkb.csv read/write
         self.initialize_paths()
         self.status_list = []
         self.last_comment_time = time.time()
@@ -56,27 +58,13 @@ class SharedData:
         # Data directories on SD card for persistence
         # Using /mmc/root/loot/loki for data that needs to survive reboots
         self.datadir = '/mmc/root/loot/loki'
-        self.logsdir = os.path.join(self.datadir, 'logs')
-        self.output_dir = os.path.join(self.datadir, 'output')
         self.input_dir = os.path.join(self.datadir, 'input')
 
         # Control file for inter-process communication (webapp <-> Bjorn)
         self.orchestrator_control_file = os.path.join(self.datadir, '.orchestrator_control')
 
-        # Create data directories if they don't exist
-        for d in [self.datadir, self.logsdir, self.output_dir, self.input_dir]:
-            os.makedirs(d, exist_ok=True)
-
-        # Directories under output_dir
-        self.crackedpwddir = os.path.join(self.output_dir, 'crackedpwd')
-        self.datastolendir = os.path.join(self.output_dir, 'data_stolen')
-        self.zombiesdir = os.path.join(self.output_dir, 'zombies')
-        self.vulnerabilities_dir = os.path.join(self.output_dir, 'vulnerabilities')
-        self.scan_results_dir = os.path.join(self.output_dir, "scan_results")
-
-        # Create output subdirectories
-        for d in [self.crackedpwddir, self.datastolendir, self.zombiesdir,
-                  self.vulnerabilities_dir, self.scan_results_dir]:
+        # Create base data directories
+        for d in [self.datadir, self.input_dir]:
             os.makedirs(d, exist_ok=True)
 
         # Default directories — loki theme for images/comments, resources for system fonts
@@ -92,7 +80,12 @@ class SharedData:
         # Dictionary files are bundled in resources/dictionary/
         self.dictionarydir = os.path.join(self.resourcesdir, "dictionary")
 
-        # Backup directories (not used on Pager, but keep for compatibility)
+        # Logs directory (global, not per-network — matches Logger class hardcoded path)
+        self.logsdir = os.path.join(self.datadir, 'logs')
+        self.webconsolelog = os.path.join(self.logsdir, 'temp_log.txt')
+        os.makedirs(self.logsdir, exist_ok=True)
+
+        # Backup directories (global, not per-network)
         self.backupbasedir = os.path.join(self.datadir, 'backup')
         self.backupdir = os.path.join(self.backupbasedir, 'backups')
         self.upload_dir = os.path.join(self.backupbasedir, 'uploads')
@@ -100,23 +93,83 @@ class SharedData:
         # Web directory (static files in payload folder)
         self.webdir = os.path.join(self.currentdir, 'web')
 
-        # Files
+        # Global config files
         self.shared_config_json = os.path.join(self.configdir, 'shared_config.json')
         self.actions_file = os.path.join(self.configdir, 'actions.json')
         self.commentsfile = os.path.join(self.commentsdir, 'comments.json')
-        self.netkbfile = os.path.join(self.datadir, "netkb.csv")
-        self.livestatusfile = os.path.join(self.datadir, 'livestatus.csv')
-        self.vuln_summary_file = os.path.join(self.vulnerabilities_dir, 'vulnerability_summary.csv')
-        self.vuln_scan_progress_file = os.path.join(self.vulnerabilities_dir, 'scan_progress.json')
         self.usersfile = os.path.join(self.dictionarydir, "users.txt")
         self.passwordsfile = os.path.join(self.dictionarydir, "passwords.txt")
+
+        # Per-network state
+        self.current_network = None
+        self.current_network_dir = None
+
+        # Initialize network-dependent paths at the base datadir (legacy default)
+        self._set_network_paths(self.datadir)
+
+        # Restore last active network if saved
+        marker = os.path.join(self.datadir, '.current_network')
+        if os.path.isfile(marker):
+            try:
+                with open(marker, 'r') as f:
+                    saved_network = f.read().strip()
+                if saved_network:
+                    self.switch_network(saved_network)
+            except Exception:
+                pass
+
+    def _set_network_paths(self, base_dir):
+        """Set all network-dependent loot paths relative to base_dir."""
+        self.loot_dir = base_dir
+        self.output_dir = os.path.join(base_dir, 'output')
+
+        # Output subdirectories
+        self.crackedpwddir = os.path.join(self.output_dir, 'crackedpwd')
+        self.datastolendir = os.path.join(self.output_dir, 'data_stolen')
+        self.zombiesdir = os.path.join(self.output_dir, 'zombies')
+        self.vulnerabilities_dir = os.path.join(self.output_dir, 'vulnerabilities')
+        self.scan_results_dir = os.path.join(self.output_dir, 'scan_results')
+
+        # Create directories
+        for d in [self.output_dir, self.crackedpwddir,
+                  self.datastolendir, self.zombiesdir,
+                  self.vulnerabilities_dir, self.scan_results_dir]:
+            os.makedirs(d, exist_ok=True)
+
+        # Per-network files
+        self.netkbfile = os.path.join(base_dir, 'netkb.csv')
+        self.livestatusfile = os.path.join(base_dir, 'livestatus.csv')
+        self.vuln_summary_file = os.path.join(self.vulnerabilities_dir, 'vulnerability_summary.csv')
+        self.vuln_scan_progress_file = os.path.join(self.vulnerabilities_dir, 'scan_progress.json')
         self.sshfile = os.path.join(self.crackedpwddir, 'ssh.csv')
-        self.smbfile = os.path.join(self.crackedpwddir, "smb.csv")
-        self.telnetfile = os.path.join(self.crackedpwddir, "telnet.csv")
-        self.ftpfile = os.path.join(self.crackedpwddir, "ftp.csv")
-        self.sqlfile = os.path.join(self.crackedpwddir, "sql.csv")
-        self.rdpfile = os.path.join(self.crackedpwddir, "rdp.csv")
-        self.webconsolelog = os.path.join(self.logsdir, 'temp_log.txt')
+        self.smbfile = os.path.join(self.crackedpwddir, 'smb.csv')
+        self.telnetfile = os.path.join(self.crackedpwddir, 'telnet.csv')
+        self.ftpfile = os.path.join(self.crackedpwddir, 'ftp.csv')
+        self.sqlfile = os.path.join(self.crackedpwddir, 'sql.csv')
+        self.rdpfile = os.path.join(self.crackedpwddir, 'rdp.csv')
+
+    def switch_network(self, network_cidr):
+        """Switch all loot paths to a network-specific subdirectory.
+
+        Args:
+            network_cidr: e.g. "192.168.1.0/24" — sanitized to "192.168.1.0_24" for dir name
+        """
+        safe_name = network_cidr.replace('/', '_')
+        self.current_network = network_cidr
+        self.current_network_dir = safe_name
+        network_base = os.path.join(self.datadir, 'networks', safe_name)
+        self._set_network_paths(network_base)
+        # Re-initialize CSV files for the new network dir
+        self.initialize_csv()
+        self.create_livestatusfile()
+        # Persist current network marker
+        try:
+            marker = os.path.join(self.datadir, '.current_network')
+            with open(marker, 'w') as f:
+                f.write(network_cidr)
+        except Exception:
+            pass
+        logger.info(f"Switched loot directory to network: {network_cidr} ({network_base})")
 
     def get_default_config(self):
         """Pager-specific default configuration."""
@@ -402,6 +455,7 @@ class SharedData:
         self.display_should_exit = False
         self._orchestrator_should_exit = False  # Local cache, use property for IPC
         self.webapp_should_exit = False
+        self.exit_code = 0  # Exit code set by display when user chooses exit/handoff
         self.manual_attack_running = False
         self.manual_attack_name = None
         self.loki_instance = None
@@ -566,9 +620,9 @@ class SharedData:
             logger.error(f"Unexpected error in generate_actions_json: {e}")
 
     def initialize_csv(self):
-        """Initialize the network knowledge base CSV file with headers if it doesn't exist."""
+        """Initialize CSV files with headers if they don't exist."""
         try:
-            # Get action names for headers
+            # Get action names for netkb headers
             action_names = []
             try:
                 with open(self.actions_file, 'r') as file:
@@ -583,7 +637,7 @@ class SharedData:
 
             headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Vendor", "Device Type"] + action_names
 
-            # Only create the file if it doesn't exist - never auto-clear
+            # Only create files if they don't exist - never auto-clear
             if not os.path.exists(self.netkbfile):
                 try:
                     with open(self.netkbfile, 'w', newline='') as file:
@@ -594,8 +648,24 @@ class SharedData:
                     logger.error(f"Error writing to netkbfile: {e}")
                 except Exception as e:
                     logger.error(f"Unexpected error while writing to netkbfile: {e}")
-            else:
-                logger.debug(f"Network knowledge base CSV file already exists at {self.netkbfile}")
+
+            # Initialize credential files with headers if missing
+            cred_files = {
+                self.sshfile: "MAC Address,IP Address,Hostname,User,Password,Port",
+                self.smbfile: "MAC Address,IP Address,Hostname,Share,User,Password,Port",
+                self.ftpfile: "MAC Address,IP Address,Hostname,User,Password,Port",
+                self.telnetfile: "MAC Address,IP Address,Hostname,User,Password,Port",
+                self.sqlfile: "MAC Address,IP Address,Hostname,User,Password,Port,Database",
+                self.rdpfile: "MAC Address,IP Address,Hostname,User,Password,Port",
+            }
+            for fpath, header in cred_files.items():
+                if not os.path.exists(fpath):
+                    try:
+                        with open(fpath, 'w') as f:
+                            f.write(header + '\n')
+                    except Exception as e:
+                        logger.error(f"Error creating credential file {fpath}: {e}")
+
         except Exception as e:
             logger.error(f"Unexpected error in initialize_csv: {e}")
 
@@ -659,6 +729,16 @@ class SharedData:
                 # Expand port ranges (e.g. "1-1024") into individual port numbers
                 if hasattr(self, 'portlist') and isinstance(self.portlist, list):
                     self.portlist = self._expand_port_list(self.portlist)
+                # Validate scan_network_prefix (must be 1-32)
+                prefix = getattr(self, 'scan_network_prefix', 24)
+                try:
+                    prefix = int(prefix)
+                except (TypeError, ValueError):
+                    prefix = 24
+                if not 1 <= prefix <= 32:
+                    logger.warning(f"Invalid scan_network_prefix {prefix}, resetting to 24")
+                    prefix = 24
+                self.scan_network_prefix = prefix
                 self._apply_log_levels()
                 # Rebuild effective IP blacklist (load_config overwrites it with raw config value)
                 self.update_mac_blacklist()
@@ -1010,51 +1090,60 @@ class SharedData:
             return [text]
 
     def read_data(self):
-        """Read data from the CSV file."""
-        self.initialize_csv()
-        data = []
-        with open(self.netkbfile, 'r') as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                data.append(row)
-        return data
-
-    def write_data(self, data):
-        """Write data to the CSV file."""
-        with open(self.actions_file, 'r') as file:
-            actions = json.load(file)
-        action_names = [action["b_class"] for action in actions if "b_class" in action]
-
-        if os.path.exists(self.netkbfile):
+        """Read data from the CSV file (thread-safe)."""
+        with self._csv_lock:
+            self.initialize_csv()
+            data = []
             with open(self.netkbfile, 'r') as file:
                 reader = csv.DictReader(file)
-                existing_headers = reader.fieldnames
-                existing_data = list(reader)
-        else:
-            existing_headers = []
-            existing_data = []
+                # Validate header contains required fields
+                if reader.fieldnames and 'MAC Address' not in reader.fieldnames:
+                    logger.warning("netkb.csv has corrupted header, regenerating")
+                    file.close()
+                    os.remove(self.netkbfile)
+                    self.initialize_csv()
+                    return []
+                for row in reader:
+                    data.append(row)
+            return data
 
-        new_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports"] + action_names
-        missing_headers = [header for header in new_headers if header not in existing_headers]
-        headers = existing_headers + missing_headers
+    def write_data(self, data):
+        """Write data to the CSV file (thread-safe)."""
+        with self._csv_lock:
+            with open(self.actions_file, 'r') as file:
+                actions = json.load(file)
+            action_names = [action["b_class"] for action in actions if "b_class" in action]
 
-        mac_to_existing_row = {row["MAC Address"]: row for row in existing_data}
-
-        for new_row in data:
-            mac_address = new_row["MAC Address"]
-            if mac_address in mac_to_existing_row:
-                existing_row = mac_to_existing_row[mac_address]
-                for key, value in new_row.items():
-                    if value:
-                        existing_row[key] = value
+            if os.path.exists(self.netkbfile):
+                with open(self.netkbfile, 'r') as file:
+                    reader = csv.DictReader(file)
+                    existing_headers = reader.fieldnames
+                    existing_data = list(reader)
             else:
-                mac_to_existing_row[mac_address] = new_row
+                existing_headers = []
+                existing_data = []
 
-        with open(self.netkbfile, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=headers)
-            writer.writeheader()
-            for row in mac_to_existing_row.values():
-                writer.writerow(row)
+            new_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports"] + action_names
+            missing_headers = [header for header in new_headers if header not in existing_headers]
+            headers = existing_headers + missing_headers
+
+            mac_to_existing_row = {row["MAC Address"]: row for row in existing_data}
+
+            for new_row in data:
+                mac_address = new_row["MAC Address"]
+                if mac_address in mac_to_existing_row:
+                    existing_row = mac_to_existing_row[mac_address]
+                    for key, value in new_row.items():
+                        if value:
+                            existing_row[key] = value
+                else:
+                    mac_to_existing_row[mac_address] = new_row
+
+            with open(self.netkbfile, 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=headers)
+                writer.writeheader()
+                for row in mac_to_existing_row.values():
+                    writer.writerow(row)
 
     def update_stats(self):
         """Update the stats based on formulas."""

@@ -44,7 +44,7 @@ class StealFilesTelnet:
             # Read with regex matching common prompts
             idx, match, data = tn.expect([rb'[\$#>%]\s*$', rb'[\$#>%]\s*\n'], timeout=timeout)
             return data
-        except:
+        except Exception:
             return tn.read_very_eager()
 
     def _read_until_marker(self, tn, marker, timeout=30, stale_timeout=30):

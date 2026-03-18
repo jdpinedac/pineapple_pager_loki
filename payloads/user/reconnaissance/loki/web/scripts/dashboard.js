@@ -65,6 +65,7 @@ const DashboardTab = {
                     <div class="stat-label">NetKB</div>
                 </div>
             </div>
+            <div class="network-panel" id="dash-network-panel"></div>
             <div class="dashboard-console">
                 <div class="console-controls">
                     <div class="filter-buttons">
@@ -169,6 +170,17 @@ const DashboardTab = {
             if (data.web_title) {
                 document.title = data.web_title;
             }
+
+            // Update network badge in nav
+            var badge = document.getElementById('network-badge');
+            if (badge) {
+                badge.textContent = data.current_network || '';
+                badge.title = data.current_network ? 'Active network: ' + data.current_network : '';
+            }
+
+            // Refresh network list periodically
+            if (!this._netCounter) this._netCounter = 0;
+            if (++this._netCounter % 5 === 0) this.refreshNetworks();
 
             const statusEl = document.getElementById('dash-orch-status');
             const detailEl = document.getElementById('dash-status-detail');
@@ -281,6 +293,30 @@ const DashboardTab = {
         if (!str) return str;
         return str.replace(/([a-z])([A-Z])/g, '$1 $2')
                   .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+    },
+
+    async refreshNetworks() {
+        try {
+            var data = await App.api('/api/networks');
+            var panel = document.getElementById('dash-network-panel');
+            if (!panel || !data.networks || data.networks.length === 0) {
+                if (panel) panel.innerHTML = '';
+                return;
+            }
+            var html = '<div class="network-panel-title">Scanned Networks</div><div class="network-list">';
+            for (var i = 0; i < data.networks.length; i++) {
+                var net = data.networks[i];
+                var cls = net.active ? 'network-chip active' : 'network-chip';
+                html += '<div class="' + cls + '">' +
+                    (net.active ? '&#9679; ' : '') + net.cidr +
+                    '<span class="chip-hosts">' + net.hosts + ' hosts</span>' +
+                    '</div>';
+            }
+            html += '</div>';
+            panel.innerHTML = html;
+        } catch (e) {
+            // Silent - will retry
+        }
     }
 };
 

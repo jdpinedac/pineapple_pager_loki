@@ -74,15 +74,14 @@ class SSHConnector:
         self.shared_data = shared_data
         self.scan = self._load_csv_filtered(shared_data.netkbfile, "22")
 
-        self.users = open(shared_data.usersfile, "r").read().splitlines()
-        self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+        with open(shared_data.usersfile, "r") as f:
+            self.users = f.read().splitlines()
+        with open(shared_data.passwordsfile, "r") as f:
+            self.passwords = f.read().splitlines()
 
         self.lock = threading.Lock()
-        self.sshfile = shared_data.sshfile
-        if not os.path.exists(self.sshfile):
-            logger.debug(f"Creating {self.sshfile}")
-            with open(self.sshfile, "w") as f:
-                f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
+        # Credential file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.results = []  # List to store results temporarily
         self.queue = Queue()
         self.progress_lock = threading.Lock()
@@ -242,10 +241,10 @@ class SSHConnector:
         Save the results of successful connection attempts to a CSV file.
         """
         # Ensure file exists with header
-        if not os.path.exists(self.sshfile):
-            with open(self.sshfile, 'w', newline='') as f:
+        if not os.path.exists(self.shared_data.sshfile):
+            with open(self.shared_data.sshfile, 'w', newline='') as f:
                 f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
-        with open(self.sshfile, 'a', newline='') as f:
+        with open(self.shared_data.sshfile, 'a', newline='') as f:
             writer = csv.writer(f)
             for row in self.results:
                 writer.writerow(row)
@@ -256,8 +255,8 @@ class SSHConnector:
         Remove duplicate entries from the results CSV file.
         """
         rows = []
-        if os.path.exists(self.sshfile):
-            with open(self.sshfile, 'r', newline='') as f:
+        if os.path.exists(self.shared_data.sshfile):
+            with open(self.shared_data.sshfile, 'r', newline='') as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 seen = set()
@@ -267,7 +266,7 @@ class SSHConnector:
                         seen.add(key)
                         rows.append(row)
 
-        with open(self.sshfile, 'w', newline='') as f:
+        with open(self.shared_data.sshfile, 'w', newline='') as f:
             writer = csv.writer(f)
             if header:
                 writer.writerow(header)

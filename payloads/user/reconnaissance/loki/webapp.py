@@ -29,11 +29,54 @@ favicon_path = os.path.join(shared_data.webdir, 'images', 'favicon.ico')
 # This prevents reimporting all action modules on every HTTP request
 _web_utils = WebUtils(shared_data, logger)
 
+# --- API Token Authentication ---
+# Generate or load a persistent API token for protecting destructive endpoints
+import uuid as _uuid
+_token_path = os.path.join(shared_data.datadir, '.api_token')
+if os.path.isfile(_token_path):
+    with open(_token_path, 'r') as _f:
+        API_TOKEN = _f.read().strip()
+else:
+    API_TOKEN = _uuid.uuid4().hex
+    os.makedirs(os.path.dirname(_token_path), exist_ok=True)
+    with open(_token_path, 'w') as _f:
+        _f.write(API_TOKEN)
+    try:
+        os.chmod(_token_path, 0o600)
+    except OSError:
+        pass
+logger.info(f"API token stored in {_token_path}")
+
+# Endpoints that require token authentication (destructive/sensitive operations)
+PROTECTED_ENDPOINTS = {
+    '/reboot', '/shutdown', '/restart_loki_service',
+    '/clear_files', '/clear_files_light', '/initialize_csv',
+    '/restore', '/connect_wifi', '/disconnect_wifi',
+    '/api/terminal', '/clear_hosts',
+    '/execute_manual_attack', '/stop_manual_attack',
+    '/stop_orchestrator', '/start_orchestrator',
+    '/download_backup',
+}
+
 class CustomHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         self.shared_data = shared_data
         self.web_utils = _web_utils  # Use shared instance
         super().__init__(*args, **kwargs)
+
+    def _check_auth(self):
+        """Check Bearer token for protected endpoints. Returns True if authorized."""
+        auth = self.headers.get('Authorization', '')
+        if auth == f'Bearer {API_TOKEN}':
+            return True
+        # Also accept token as query parameter for browser convenience
+        if f'token={API_TOKEN}' in self.path:
+            return True
+        self.send_response(401)
+        self.send_header("Content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "Unauthorized. Bearer token required."}).encode('utf-8'))
+        return False
 
     def log_message(self, format, *args):
         # Override to suppress logging of GET requests.
@@ -65,6 +108,10 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
         """Serve a file (without gzip for now)."""
         with open(file_path, 'rb') as file:
             content = file.read()
+        # Inject API token into HTML pages so the frontend JS can authenticate
+        if content_type == 'text/html':
+            token_script = f'<script>window.LOKI_API_TOKEN="{API_TOKEN}";</script>'.encode('utf-8')
+            content = content.replace(b'</head>', token_script + b'</head>', 1)
         self.send_gzipped_response(content, content_type)
 
     # HTML pages that should all serve the SPA index.html
@@ -73,10 +120,26 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         # Handle GET requests. Serve the SPA shell for all page URLs.
+        if self.path == '/api/token':
+            # Only serve token to localhost (SSH access)
+            client_ip = self.client_address[0]
+            if client_ip in ('127.0.0.1', '::1'):
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"token": API_TOKEN}).encode('utf-8'))
+            else:
+                self.send_response(403)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Token only available from localhost"}).encode('utf-8'))
+            return
         if self.path in self.SPA_PAGES:
             self.serve_file_gzipped(os.path.join(self.shared_data.webdir, 'index.html'), 'text/html')
         elif self.path == '/api/stats':
             self.web_utils.serve_stats(self)
+        elif self.path == '/api/networks':
+            self.web_utils.serve_networks(self)
         elif self.path == '/api/vulnerabilities':
             self.web_utils.serve_vulnerabilities(self)
         elif self.path.startswith('/api/host_loot_summary/'):
@@ -153,6 +216,10 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         # Handle POST requests for saving configuration, connecting to Wi-Fi, clearing files, rebooting, and shutting down.
+        # Check authentication for protected endpoints
+        post_path = self.path.split('?')[0]  # Strip query params for matching
+        if post_path in PROTECTED_ENDPOINTS and not self._check_auth():
+            return
         if self.path == '/save_config':
             self.web_utils.save_configuration(self)
         elif self.path == '/connect_wifi':
@@ -203,7 +270,9 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
             self.web_utils.update_kev_catalog(self)
         else:
             self.send_response(404)
+            self.send_header("Content-type", "application/json")
             self.end_headers()
+            self.wfile.write(b'{"error":"Not found"}')
 
 class WebThread(threading.Thread):
     """

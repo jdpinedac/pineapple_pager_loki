@@ -365,6 +365,8 @@ class Display:
                     self.shared_data.should_exit = True
                     self.shared_data.display_should_exit = True
                     self.shared_data.orchestrator_should_exit = True
+                    self.shared_data.webapp_should_exit = True
+                    self.shared_data.exit_code = action
                     if action == 42:
                         # Write .next_payload for handoff
                         data_dir = os.path.join(PAYLOAD_DIR, 'data')
@@ -373,13 +375,14 @@ class Display:
                         with open(next_payload_path, 'w') as f:
                             f.write(self._handoff_launcher_path)
                         logger.info(f"Wrote .next_payload: {self._handoff_launcher_path}")
-                    self.cleanup()
                     # Kill any running nmap subprocesses before exit
                     try:
                         subprocess.run(['killall', 'nmap'], capture_output=True, timeout=5)
                     except Exception:
                         pass
-                    os._exit(action)
+                    # Break out of input loop; display run() loop will also exit
+                    # via display_should_exit and handle cleanup + graceful thread shutdown
+                    return
             except Exception as e:
                 logger.error(f"Error in input handler: {e}")
                 time.sleep(1.0)
@@ -811,7 +814,7 @@ class Display:
                             reader = csv.reader(f)
                             next(reader, None)
                             total_passwords += sum(1 for _ in reader)
-                    except:
+                    except Exception:
                         pass
                 self.shared_data.crednbr = total_passwords
 
@@ -844,7 +847,7 @@ class Display:
         try:
             result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=5)
             return bool(result.stdout.strip())
-        except:
+        except Exception:
             return False
 
     def is_manual_mode(self):
@@ -1087,7 +1090,7 @@ class Display:
             try:
                 self.pager.draw_image_file_scaled(icon_x, icon_y, icon_size, icon_size,
                                                    self.shared_data.lokistatusimage_path)
-            except:
+            except Exception:
                 pass
 
         text_x = icon_x + icon_size + 8
@@ -1147,7 +1150,7 @@ class Display:
                     self.pager.draw_image_file_scaled_rotated(L["x"], L["y"], L["w"], L["h"], frise_path, 90)
                 else:
                     self.pager.draw_image_file_scaled(L["x"], L["y"], L["w"], L["h"], frise_path)
-            except:
+            except Exception:
                 pass
 
     def draw_character_and_corner_stats(self):
@@ -1235,7 +1238,7 @@ class Display:
                 self.shared_data.update_lokistatus()
                 self.update_leds(self.shared_data.lokiorch_status)
                 self.render_frame()
-                time.sleep(0.05)
+                time.sleep(0.2)
             except Exception as e:
                 logger.error(f"Error in display loop: {e}")
                 time.sleep(0.1)

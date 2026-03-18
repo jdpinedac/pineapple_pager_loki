@@ -135,6 +135,61 @@ a:hover { color: var(--gold-bright); }
     letter-spacing: 0.5px;
 }
 
+/* --- Network Badge --- */
+.network-badge {
+    display: flex;
+    align-items: center;
+    padding: 4px 12px;
+    margin-left: auto;
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.network-badge:not(:empty) {
+    color: var(--gold-dim);
+    border-left: 1px solid var(--border);
+}
+
+/* --- Network Panel (Dashboard) --- */
+.network-panel {
+    margin-bottom: 12px;
+}
+.network-panel-title {
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+.network-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.network-chip {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 5px 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.network-chip.active {
+    border-color: var(--gold-dim);
+    color: var(--gold);
+}
+.network-chip .chip-hosts {
+    font-size: 9px;
+    color: var(--text-muted);
+    background: var(--bg-elevated);
+    padding: 1px 5px;
+    border-radius: 3px;
+}
+
 /* --- Main Content --- */
 #content {
     flex: 1;

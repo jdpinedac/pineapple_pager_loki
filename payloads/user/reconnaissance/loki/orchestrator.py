@@ -41,7 +41,9 @@ class Orchestrator:
         self.load_actions()  # Load all actions from the actions file
         actions_loaded = [action.__class__.__name__ for action in self.actions + self.standalone_actions]  # Get the names of the loaded actions
         logger.info(f"Actions loaded: {actions_loaded}")
-        self.semaphore = threading.Semaphore(10)  # Limit the number of active threads to 10
+        max_threads = getattr(self.shared_data, 'worker_threads', 10) or 10
+        self.semaphore = threading.Semaphore(max_threads)
+        self._exhausted_hosts = set()  # Cache of MAC addresses with all actions exhausted
 
         # Read and validate attack ordering strategy
         valid_orders = ('spread', 'per_host', 'per_phase')
@@ -59,17 +61,32 @@ class Orchestrator:
             try:
                 self.target_network = ipaddress.IPv4Network(f"{env_ip}/{scan_prefix}", strict=False)
                 logger.info(f"Orchestrator target network: {self.target_network}")
-                # Archive netkb if network changed
-                self._archive_netkb_if_network_changed()
+                # Switch loot paths to a network-specific directory
+                self.shared_data.switch_network(str(self.target_network))
             except Exception as e:
                 logger.error(f"Error parsing target network: {e}")
 
-    def _archive_netkb_if_network_changed(self):
-        """Archive netkb.csv on every Bjorn start for a fresh scan."""
-        netkb_file = self.shared_data.netkbfile
-        network_marker_file = os.path.join(self.shared_data.datadir, '.last_network')
+    def _cleanup_old_archives(self, max_archives=20):
+        """Remove old archives to prevent SD card from filling up."""
+        archive_path = os.path.join(self.shared_data.loot_dir, 'archives')
+        if not os.path.isdir(archive_path):
+            return
+        archives = sorted(
+            [f for f in os.listdir(archive_path) if f.startswith('netkb_')],
+            key=lambda f: os.path.getmtime(os.path.join(archive_path, f))
+        )
+        while len(archives) > max_archives:
+            oldest = archives.pop(0)
+            try:
+                os.remove(os.path.join(archive_path, oldest))
+                logger.info(f"Removed old archive: {oldest}")
+            except Exception as e:
+                logger.error(f"Error removing archive {oldest}: {e}")
 
-        current_network = str(self.target_network)
+    def _archive_netkb_if_needed(self):
+        """Archive netkb.csv on startup if it has data and clear_hosts_on_startup is set."""
+        self._cleanup_old_archives()
+        netkb_file = self.shared_data.netkbfile
 
         # Check if netkb has any data worth archiving
         has_data = False
@@ -77,17 +94,17 @@ class Orchestrator:
             try:
                 with open(netkb_file, 'r') as f:
                     lines = f.readlines()
-                    # More than just the header = has data
                     has_data = len(lines) > 1
-            except:
+            except Exception:
                 pass
 
         # Archive if there's data
         if has_data:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_network = current_network.replace('/', '_')
+            safe_network = (self.shared_data.current_network_dir or 'unknown')
             archive_name = f"netkb_{safe_network}_{timestamp}.csv"
-            archive_path = os.path.join(self.shared_data.datadir, 'archives')
+            # Store archives inside the network's loot directory
+            archive_path = os.path.join(self.shared_data.loot_dir, 'archives')
             os.makedirs(archive_path, exist_ok=True)
             archive_file = os.path.join(archive_path, archive_name)
 
@@ -105,16 +122,9 @@ class Orchestrator:
                     import csv
                     writer = csv.writer(f)
                     writer.writerow(['MAC Address', 'IPs', 'Hostnames', 'Alive', 'Ports'])
-                logger.info(f"Cleared netkb.csv for fresh scan on {current_network}")
+                logger.info(f"Cleared netkb.csv for fresh scan")
             except Exception as e:
                 logger.error(f"Error clearing netkb.csv: {e}")
-
-        # Update the network marker
-        try:
-            with open(network_marker_file, 'w') as f:
-                f.write(current_network)
-        except Exception as e:
-            logger.error(f"Error writing network marker: {e}")
 
     def is_ip_in_target_network(self, ip):
         """Check if an IP is within the target network range."""
@@ -122,7 +132,7 @@ class Orchestrator:
             return True  # No filter if no target network set
         try:
             return ipaddress.IPv4Address(ip) in self.target_network
-        except:
+        except Exception:
             return False
 
     def load_actions(self):
@@ -214,10 +224,16 @@ class Orchestrator:
                 continue
 
             ip, ports = row["IPs"], row["Ports"].split(';')
+            mac = row.get("MAC Address", "")
+
+            # Skip hosts cached as exhausted
+            if mac in self._exhausted_hosts:
+                continue
 
             # Skip hosts where all actions are exhausted
             if self._host_fully_exhausted(row, ports):
                 logger.debug(f"Host {ip} fully exhausted, skipping")
+                self._exhausted_hosts.add(mac)
                 continue
 
             logger.info(f"Processing host {ip}...")
@@ -463,8 +479,8 @@ class Orchestrator:
                 try:
                     last_success_time = datetime.strptime(action_status.split('_')[1] + "_" + action_status.split('_')[2], "%Y%m%d_%H%M%S")
                     if datetime.now() < last_success_time + timedelta(seconds=self.shared_data.success_retry_delay):
-                        retry_in_seconds = (last_success_time + timedelta(seconds=self.shared_data.success_retry_delay) - datetime.now()).seconds
-                        formatted_retry_in = str(timedelta(seconds=retry_in_seconds))
+                        retry_in_seconds = (last_success_time + timedelta(seconds=self.shared_data.success_retry_delay) - datetime.now()).total_seconds()
+                        formatted_retry_in = str(timedelta(seconds=int(retry_in_seconds)))
                         logger.warning(f"Skipping action {action.action_name} for {ip}:{action.port} due to success retry delay, retry possible in: {formatted_retry_in}")
                         return False  # Skip if the success retry delay has not passed
                 except ValueError as ve:
@@ -490,8 +506,8 @@ class Orchestrator:
                     logger.warning(f"Skipping action {action.action_name} for {ip}:{action.port} - max retries ({max_retries}) reached")
                     return False
                 if datetime.now() < last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay):
-                    retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).seconds
-                    formatted_retry_in = str(timedelta(seconds=retry_in_seconds))
+                    retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).total_seconds()
+                    formatted_retry_in = str(timedelta(seconds=int(retry_in_seconds)))
                     logger.warning(f"Skipping action {action.action_name} for {ip}:{action.port} due to failed retry delay ({fail_count}/{max_retries}), retry possible in: {formatted_retry_in}")
                     return False
             except (ValueError, IndexError):
@@ -499,8 +515,8 @@ class Orchestrator:
                 try:
                     last_failed_time = datetime.strptime(last_failed_time_str.split('_')[1] + "_" + last_failed_time_str.split('_')[2], "%Y%m%d_%H%M%S")
                     if datetime.now() < last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay):
-                        retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).seconds
-                        formatted_retry_in = str(timedelta(seconds=retry_in_seconds))
+                        retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).total_seconds()
+                        formatted_retry_in = str(timedelta(seconds=int(retry_in_seconds)))
                         logger.warning(f"Skipping action {action.action_name} for {ip}:{action.port} due to failed retry delay, retry possible in: {formatted_retry_in}")
                         return False
                 except (ValueError, IndexError):
@@ -567,8 +583,8 @@ class Orchestrator:
                 try:
                     last_success_time = datetime.strptime(row[action_key].split('_')[1] + "_" + row[action_key].split('_')[2], "%Y%m%d_%H%M%S")
                     if datetime.now() < last_success_time + timedelta(seconds=self.shared_data.success_retry_delay):
-                        retry_in_seconds = (last_success_time + timedelta(seconds=self.shared_data.success_retry_delay) - datetime.now()).seconds
-                        formatted_retry_in = str(timedelta(seconds=retry_in_seconds))
+                        retry_in_seconds = (last_success_time + timedelta(seconds=self.shared_data.success_retry_delay) - datetime.now()).total_seconds()
+                        formatted_retry_in = str(timedelta(seconds=int(retry_in_seconds)))
                         logger.warning(f"Skipping standalone action {action.action_name} due to success retry delay, retry possible in: {formatted_retry_in}")
                         return False  # Skip if the success retry delay has not passed
                 except ValueError as ve:
@@ -593,16 +609,16 @@ class Orchestrator:
                     logger.warning(f"Skipping standalone action {action.action_name} - max retries ({max_retries}) reached")
                     return False
                 if datetime.now() < last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay):
-                    retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).seconds
-                    formatted_retry_in = str(timedelta(seconds=retry_in_seconds))
+                    retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).total_seconds()
+                    formatted_retry_in = str(timedelta(seconds=int(retry_in_seconds)))
                     logger.warning(f"Skipping standalone action {action.action_name} due to failed retry delay ({fail_count}/{max_retries}), retry possible in: {formatted_retry_in}")
                     return False
             except (ValueError, IndexError):
                 try:
                     last_failed_time = datetime.strptime(last_failed_time_str.split('_')[1] + "_" + last_failed_time_str.split('_')[2], "%Y%m%d_%H%M%S")
                     if datetime.now() < last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay):
-                        retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).seconds
-                        formatted_retry_in = str(timedelta(seconds=retry_in_seconds))
+                        retry_in_seconds = (last_failed_time + timedelta(seconds=self.shared_data.failed_retry_delay) - datetime.now()).total_seconds()
+                        formatted_retry_in = str(timedelta(seconds=int(retry_in_seconds)))
                         logger.warning(f"Skipping standalone action {action.action_name} due to failed retry delay, retry possible in: {formatted_retry_in}")
                         return False
                 except (ValueError, IndexError):
@@ -647,6 +663,9 @@ class Orchestrator:
     def run(self):
         """Run the orchestrator cycle to execute actions"""
         try:
+            # Archive netkb if needed before starting
+            self._archive_netkb_if_needed()
+
             # Run the scanner a first time to get the initial data (skip if manual mode)
             if not self.shared_data.manual_mode:
                 self.shared_data.lokiorch_status = "NetworkScanner"
@@ -676,6 +695,7 @@ class Orchestrator:
                     if self.network_scanner:
                         self.shared_data.lokiorch_status = "NetworkScanner"
                         self.network_scanner.scan()
+                        self._exhausted_hosts.clear()  # New scan may discover new ports/hosts
                         if self.shared_data.orchestrator_should_exit or self.shared_data.manual_mode:
                             continue
                         # Re-read updated data after scan and re-run with same strategy

@@ -130,7 +130,7 @@ var AttacksTab = {
         if (!this.isManualMode) {
             this.isManualMode = true;
             this.applyManualModeUI(true);
-            try { await App.post('/stop_orchestrator'); } catch (e) {}
+            try { await App.post('/stop_orchestrator'); } catch (e) { App.toast('Failed to stop orchestrator', 'error'); }
             this.setStatus('Manual Mode', 'idle');
             App.toast('Manual mode enabled - orchestrator paused', 'info');
             this.loadOptions();
@@ -144,7 +144,7 @@ var AttacksTab = {
             this.stopAttackLog();
             document.getElementById('attack-log-output').classList.remove('visible');
             this.setStatus('', '');
-            try { await App.post('/start_orchestrator'); } catch (e) {}
+            try { await App.post('/start_orchestrator'); } catch (e) { App.toast('Failed to start orchestrator', 'error'); }
             App.toast('Manual mode disabled - orchestrator resumed', 'info');
         }
     },

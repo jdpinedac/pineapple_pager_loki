@@ -30,3 +30,6 @@ dev_backup/
 build-output/
 src/openssl-3.0.13/
 
+# Claude Code
+CLAUDE.md
+.claude/

@@ -41,6 +41,7 @@ Loki is a Tamagotchi-style autonomous network reconnaissance companion. It autom
 - **LCD Display** — Status updates on the Pager's full color screen with themed character animations and auto-dim for battery saving
 - **Battery Indicator** — Real-time battery percentage in the header with charging state, auto-hides when unavailable
 - **Real-Time Stats** — Data stolen counter updates immediately as files are exfiltrated. All stats refresh in real time.
+- **Per-Network Loot Separation** — Each scanned network (WiFi or Ethernet) gets its own loot directory, so results never mix across different networks. Previous scan data is preserved and resumed automatically.
 - **Theme System** — 6 themes with custom animations, colors, fonts, and commentary. See [THEME_README.md](THEME_README.md) for details.
 
 ## Supported Protocols
@@ -104,8 +105,8 @@ HTTP ports use batched NSE scripts optimized for MIPS to avoid CPU starvation. N
 
 - WiFi Pineapple Pager
 - **Network connection** — Pager must be connected to a network to scan (WiFi client mode or Ethernet/USB)
-- **Internet connection** (first run only) — Required to install Python3 via opkg
-- Nmap and all Python dependencies are bundled — only Python3 itself needs internet
+- **Internet connection** (first run only) — Required to install Python3 and stdlib packages via opkg
+- Nmap and all Python library dependencies are bundled in `lib/` — only Python3 core and its stdlib split packages need internet (`python3`, `python3-ctypes`, `python3-xml`, `python3-urllib`, `python3-openssl`, `python3-uuid`)
 
 ## Installation
 
@@ -211,6 +212,24 @@ Loki includes a full web UI at `http://<pager-ip>:8000` with Dashboard, Hosts, A
 <p align="center">
   <img src="screenshots/02-webui-dashboard.png" width="700" alt="Web UI Dashboard">
 </p>
+
+#### API Authentication
+
+Destructive endpoints (reboot, shutdown, terminal, clear files, restore, etc.) are protected by a Bearer token. The token is generated automatically on first run and stored at `/mmc/root/loot/loki/data/.api_token`.
+
+The web UI handles authentication transparently — the token is injected into the page when it loads, so all actions work from the browser without extra steps.
+
+For external API access (scripts, curl), include the token as a header:
+```bash
+# Get the token via SSH
+cat /mmc/root/loot/loki/data/.api_token
+
+# Use it in API calls
+curl -X POST http://<pager-ip>:8000/reboot \
+  -H "Authorization: Bearer <token>"
+```
+
+Read-only endpoints (stats, network data, display mirror, theme) do not require authentication.
 
 ### Display Modes
 
@@ -390,32 +409,42 @@ File stealing runs independently — it only needs existing credentials for the 
 
 ## Output Locations
 
-All data is stored in `/mmc/root/loot/loki/`:
+All data is stored in `/mmc/root/loot/loki/`. Loot is **separated by network** — each scanned network (WiFi or Ethernet) gets its own directory, so results from different networks never mix:
 
 ```
 /mmc/root/loot/loki/
-├── netkb.csv              # Network knowledge base (discovered hosts)
-├── livestatus.csv         # Current scan status
-├── logs/                  # Application logs (one file per module)
-├── archives/              # Archived netkb.csv files
-└── output/
-    ├── crackedpwd/        # Cracked credentials by protocol
-    │   ├── ftp.csv
-    │   ├── ssh.csv
-    │   ├── smb.csv
-    │   ├── sql.csv
-    │   ├── telnet.csv
-    │   └── rdp.csv
-    ├── data_stolen/       # Exfiltrated files by protocol/host
-    │   ├── ftp/<mac>_<ip>/
-    │   ├── ssh/<mac>_<ip>/
-    │   ├── smb/<mac>_<ip>/
-    │   ├── sql/<mac>_<ip>/     # Database table dumps
-    │   ├── telnet/<mac>_<ip>/
-    │   └── recon/file_listings/  # Complete file listings
-    ├── scan_results/      # Network scan results
-    └── vulnerabilities/   # Nmap vulnerability scan results
+├── .current_network              # Active network marker (e.g., "192.168.1.0/24")
+├── logs/                         # Application logs (global, all networks)
+├── networks/
+│   ├── 192.168.1.0_24/           # Network-specific loot directory
+│   │   ├── netkb.csv             # Network knowledge base (discovered hosts)
+│   │   ├── livestatus.csv        # Current scan status
+│   │   ├── archives/             # Archived netkb.csv files
+│   │   └── output/
+│   │       ├── crackedpwd/       # Cracked credentials by protocol
+│   │       │   ├── ftp.csv
+│   │       │   ├── ssh.csv
+│   │       │   ├── smb.csv
+│   │       │   ├── sql.csv
+│   │       │   ├── telnet.csv
+│   │       │   └── rdp.csv
+│   │       ├── data_stolen/      # Exfiltrated files by protocol/host
+│   │       │   ├── ftp/<mac>_<ip>/
+│   │       │   ├── ssh/<mac>_<ip>/
+│   │       │   ├── smb/<mac>_<ip>/
+│   │       │   ├── sql/<mac>_<ip>/
+│   │       │   ├── telnet/<mac>_<ip>/
+│   │       │   └── recon/file_listings/
+│   │       ├── scan_results/     # Network scan results
+│   │       └── vulnerabilities/  # Nmap vulnerability scan results
+│   └── 10.0.0.0_24/             # Another network's loot
+│       └── ...
+├── config/                       # Global settings (not per-network)
+├── backup/                       # Global backups
+└── input/                        # Global input files
 ```
+
+When Loki connects to a network, it automatically creates a directory named after the network CIDR (e.g., `192.168.1.0_24`). Previous scan results are preserved — switching back to an old network resumes where you left off.
 
 ## Architecture
 
@@ -546,7 +575,7 @@ HTTP ports (80, 443, 8080, 8443) use batched NSE scripts optimized for MIPS to a
 
 ## Logging
 
-Logs are stored in `/mmc/root/loot/loki/logs/` with one file per module. Toggle log levels in the config (`log_debug`, `log_info`, `log_warning`, `log_error`, `log_critical`).
+Logs are stored globally in `/mmc/root/loot/loki/logs/` with one file per module. Toggle log levels in the config (`log_debug`, `log_info`, `log_warning`, `log_error`, `log_critical`).
 
 View combined logs via the web interface Dashboard console or:
 ```bash
@@ -561,8 +590,18 @@ A Docker-based vulnerable test environment is provided in `test_targets/`. See [
 
 ### Loki won't start
 - Check that the Pager has internet access (required for first run to install Python3)
-- The payload automatically installs Python3 via opkg — check the display for installation progress
+- The payload automatically installs Python3 and its stdlib packages via opkg — check the display for installation progress
 - If installation fails, try running the payload again with internet connectivity
+
+### Black screen / device restarts on launch
+- This is usually caused by missing Python3 stdlib packages. OpenWrt splits the Python standard library into separate opkg packages (`python3-xml`, `python3-urllib`, `python3-openssl`, `python3-uuid`). The payload installs these automatically, but if the first run was interrupted or had no internet, they may be missing.
+- SSH into the Pager and install them manually:
+  ```bash
+  opkg -d mmc install python3 python3-ctypes python3-xml python3-urllib python3-openssl python3-uuid
+  ```
+
+### Device restarts when exiting the payload
+- On large network scans (~30+ hosts), Loki uses more RAM. If threads are not cleaned up before the Pager GUI restarts, the combined memory usage can cause an OOM kernel panic. This has been fixed with graceful thread shutdown — ensure you are running the latest version.
 
 ### No hosts discovered
 - Check that you're connected to an active network
@@ -578,6 +617,9 @@ A Docker-based vulnerable test environment is provided in `test_targets/`. See [
 - Verify Loki is running (`ps | grep python`)
 - Check firewall rules
 - Try accessing via the Pager's br-lan IP
+
+### Web terminal returns "Unauthorized" (HTTP 401)
+- Destructive endpoints require an API token. The web UI handles this automatically by injecting the token into the page. If you see 401 errors, try a hard refresh (Ctrl+Shift+R) to reload the page with the current token.
 
 ---
 

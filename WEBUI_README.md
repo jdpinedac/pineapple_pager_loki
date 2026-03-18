@@ -4,6 +4,8 @@ Access the web UI at `http://<pager-ip>:8000`. It is a single-page app that prov
 
 Only the active tab polls the server — inactive tabs stop polling to conserve device resources.
 
+**Authentication:** Destructive actions (reboot, shutdown, terminal, clear files, restore, manual attacks) are protected by an API token. The web UI handles this transparently — the token is injected into the page on load. For external API access, retrieve the token via SSH: `cat /mmc/root/loot/loki/data/.api_token`.
+
 ## Dashboard
 
 <p align="center">

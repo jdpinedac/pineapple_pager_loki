@@ -36,7 +36,7 @@ def run_with_timeout(func, timeout, *args, **kwargs):
             raise TimeoutError(f"Function {func.__name__} timed out after {timeout} seconds")
 
 
-def subprocess_with_timeout(cmd, timeout=60, shell=True):
+def subprocess_with_timeout(cmd, timeout=60, shell=False):
     """
     Run a subprocess with guaranteed termination on timeout.
 

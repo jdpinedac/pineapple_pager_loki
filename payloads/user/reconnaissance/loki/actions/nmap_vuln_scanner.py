@@ -147,7 +147,8 @@ class NmapVulnScanner:
     def __init__(self, shared_data):
         self.shared_data = shared_data
         self.scan_results = []
-        self.summary_file = self.shared_data.vuln_summary_file
+        # summary_file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.create_summary_file()
         self._check_nse_available()
         self._init_threat_intel()
@@ -181,8 +182,8 @@ class NmapVulnScanner:
     def _update_vuln_counter(self):
         """Update shared_data.vulnnbr from vulnerability_summary.csv."""
         try:
-            if os.path.exists(self.summary_file):
-                with open(self.summary_file, 'r', newline='') as f:
+            if os.path.exists(self.shared_data.vuln_summary_file):
+                with open(self.shared_data.vuln_summary_file, 'r', newline='') as f:
                     reader = csv.DictReader(f)
                     total = 0
                     for row in reader:
@@ -216,9 +217,9 @@ class NmapVulnScanner:
         """
         Creates a summary file for vulnerabilities if it does not exist.
         """
-        if not os.path.exists(self.summary_file):
+        if not os.path.exists(self.shared_data.vuln_summary_file):
             os.makedirs(self.shared_data.vulnerabilities_dir, exist_ok=True)
-            with open(self.summary_file, 'w', newline='') as f:
+            with open(self.shared_data.vuln_summary_file, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(["IP", "Hostname", "MAC Address", "Port", "Vulnerabilities"])
 
@@ -229,8 +230,8 @@ class NmapVulnScanner:
         try:
             # Read existing data
             rows = []
-            if os.path.exists(self.summary_file):
-                with open(self.summary_file, 'r', newline='') as f:
+            if os.path.exists(self.shared_data.vuln_summary_file):
+                with open(self.shared_data.vuln_summary_file, 'r', newline='') as f:
                     reader = csv.DictReader(f)
                     rows = list(reader)
 
@@ -246,7 +247,7 @@ class NmapVulnScanner:
             rows = list(seen.values())
 
             # Save the updated data back to the summary file
-            with open(self.summary_file, 'w', newline='') as f:
+            with open(self.shared_data.vuln_summary_file, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=["IP", "Hostname", "MAC Address", "Port", "Vulnerabilities"])
                 writer.writeheader()
                 writer.writerows(rows)
@@ -1001,8 +1002,8 @@ class NmapVulnScanner:
 
             # Read existing data
             rows = []
-            if os.path.exists(self.summary_file):
-                with open(self.summary_file, 'r', newline='') as f:
+            if os.path.exists(self.shared_data.vuln_summary_file):
+                with open(self.shared_data.vuln_summary_file, 'r', newline='') as f:
                     reader = csv.DictReader(f)
                     rows = list(reader)
 

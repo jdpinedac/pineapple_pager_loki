@@ -41,7 +41,7 @@ class NetworkScanner:
         self.ip_scan_blacklist = shared_data.ip_scan_blacklist
         self.lock = threading.Lock()
         self.currentdir = shared_data.currentdir
-        self.semaphore = threading.Semaphore(200)
+        self.semaphore = threading.Semaphore(20)
         self.nm = nmap.PortScanner()
         self.running = False
         # Load OUI database for device classification
@@ -189,7 +189,7 @@ class NetworkScanner:
                                     try:
                                         if ipaddress.IPv4Address(ip) not in scanned_network:
                                             continue
-                                    except:
+                                    except Exception:
                                         continue
                                 if self.ping_host(ip):
                                     self.logger.info(f"Ping fallback: {ip} ({mac}) is alive")
@@ -532,7 +532,7 @@ class NetworkScanner:
                 con = s.connect((self.target, port))
                 self.open_ports[self.target].append(port)
                 con.close()
-            except:
+            except Exception:
                 pass
             finally:
                 s.close()

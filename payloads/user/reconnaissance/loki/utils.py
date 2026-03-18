@@ -3,7 +3,6 @@
 import json
 import subprocess
 import os
-import json
 import csv
 import zipfile
 import uuid
@@ -142,7 +141,7 @@ class WebUtils:
                                 'network': str(network),
                                 'display': f"{ip}/{prefix} ({current_iface})"
                             })
-                        except:
+                        except Exception:
                             pass
 
             handler.send_response(200)
@@ -692,7 +691,7 @@ class WebUtils:
 
             open_ports = []
             lock = threading.Lock()
-            semaphore = threading.Semaphore(100)  # Limit concurrent connections
+            semaphore = threading.Semaphore(20)  # Limit concurrent connections
 
             def scan_port(port):
                 with semaphore:
@@ -1045,6 +1044,8 @@ class WebUtils:
                 'manual_attack_name': getattr(sd, 'manual_attack_name', None),
                 'orchestrator_should_exit': getattr(sd, 'orchestrator_should_exit', False),
                 'web_title': getattr(sd, 'web_title', 'Loki'),
+                'current_network': getattr(sd, 'current_network', None),
+                'current_network_dir': getattr(sd, 'current_network_dir', None),
             }
             handler.send_response(200)
             handler.send_header("Content-type", "application/json")
@@ -1057,10 +1058,58 @@ class WebUtils:
             handler.end_headers()
             handler.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
 
-    def execute_terminal_command(self, handler):
-        """Execute a command via subprocess and return output. Basic blocklist for dangerous patterns."""
+    def serve_networks(self, handler):
+        """List available per-network loot directories and the active network."""
         try:
-            content_length = int(handler.headers['Content-Length'])
+            sd = self.shared_data
+            networks_dir = os.path.join(sd.datadir, 'networks')
+            networks = []
+            if os.path.isdir(networks_dir):
+                for name in sorted(os.listdir(networks_dir)):
+                    full = os.path.join(networks_dir, name)
+                    if os.path.isdir(full):
+                        cidr = name.replace('_', '/', 1) if '_' in name else name
+                        # Count hosts in netkb if it exists
+                        netkb = os.path.join(full, 'netkb.csv')
+                        host_count = 0
+                        if os.path.isfile(netkb):
+                            try:
+                                with open(netkb, 'r') as f:
+                                    host_count = max(0, sum(1 for _ in f) - 1)
+                            except Exception:
+                                pass
+                        networks.append({
+                            'cidr': cidr,
+                            'dir_name': name,
+                            'hosts': host_count,
+                            'active': (cidr == sd.current_network),
+                        })
+            result = {
+                'current_network': sd.current_network,
+                'networks': networks,
+            }
+            handler.send_response(200)
+            handler.send_header("Content-type", "application/json")
+            handler.send_header("Cache-Control", "no-cache")
+            handler.end_headers()
+            handler.wfile.write(json.dumps(result).encode('utf-8'))
+        except Exception as e:
+            handler.send_response(500)
+            handler.send_header("Content-type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
+
+    def execute_terminal_command(self, handler):
+        """Execute a command via subprocess and return output. Requires API token auth."""
+        MAX_CMD_SIZE = 4096
+        try:
+            content_length = int(handler.headers.get('Content-Length', 0))
+            if content_length > MAX_CMD_SIZE:
+                handler.send_response(413)
+                handler.send_header("Content-type", "application/json")
+                handler.end_headers()
+                handler.wfile.write(json.dumps({"error": "Command too large"}).encode('utf-8'))
+                return
             post_data = handler.rfile.read(content_length).decode('utf-8')
             params = json.loads(post_data)
             command = params.get('command', '').strip()
@@ -1254,8 +1303,15 @@ class WebUtils:
             handler.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
 
     def restore(self, handler):
+        MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB max upload
         try:
             content_length = int(handler.headers['Content-Length'])
+            if content_length > MAX_UPLOAD_SIZE:
+                handler.send_response(413)
+                handler.send_header("Content-type", "application/json")
+                handler.end_headers()
+                handler.wfile.write(json.dumps({"status": "error", "message": "Upload too large (max 50MB)"}).encode('utf-8'))
+                return
             field_data = handler.rfile.read(content_length)
             field_storage = cgi.FieldStorage(fp=io.BytesIO(field_data), headers=handler.headers, environ={'REQUEST_METHOD': 'POST'})
 
@@ -1266,6 +1322,12 @@ class WebUtils:
                     output_file.write(file_item.file.read())
 
                 with zipfile.ZipFile(backup_path, 'r') as backup_zip:
+                    # Validate all paths before extracting to prevent zip path traversal
+                    target_dir = os.path.realpath(self.shared_data.currentdir)
+                    for member in backup_zip.namelist():
+                        member_path = os.path.realpath(os.path.join(target_dir, member))
+                        if not member_path.startswith(target_dir):
+                            raise ValueError(f"Blocked path traversal in zip: {member}")
                     backup_zip.extractall(self.shared_data.currentdir)
 
                 handler.send_response(200)
@@ -1284,8 +1346,22 @@ class WebUtils:
             handler.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
 
     def download_backup(self, handler):
-        query = unquote(handler.path.split('?filename=')[1])
-        backup_path = os.path.join(self.shared_data.backupdir, query)
+        parts = handler.path.split('?filename=', 1)
+        if len(parts) < 2 or not parts[1]:
+            handler.send_response(400)
+            handler.send_header("Content-type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(b'{"error":"Missing filename parameter"}')
+            return
+        query = unquote(parts[1])
+        backup_path = os.path.realpath(os.path.join(self.shared_data.backupdir, query))
+        # Prevent path traversal
+        if not backup_path.startswith(os.path.realpath(self.shared_data.backupdir)):
+            handler.send_response(403)
+            handler.send_header("Content-type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(b'{"error":"Forbidden"}')
+            return
         if os.path.isfile(backup_path):
             handler.send_response(200)
             handler.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(backup_path)}"')
@@ -1295,7 +1371,9 @@ class WebUtils:
                 handler.wfile.write(file.read())
         else:
             handler.send_response(404)
+            handler.send_header("Content-type", "application/json")
             handler.end_headers()
+            handler.wfile.write(b'{"error":"Not found"}')
 
     def serve_credentials_data(self, handler):
         try:
@@ -1658,15 +1736,30 @@ class WebUtils:
 
     def clear_files(self, handler):
         try:
-            # Clear logs, stolen data, scan results, zombies - but NOT credentials
-            loot_dir = self.shared_data.loot_dir
-            command = f"""
-            rm -rf {loot_dir}/logs/* && rm -rf {loot_dir}/output/data_stolen/* && rm -rf {loot_dir}/output/scan_results/* && rm -rf {loot_dir}/output/vulnerabilities/* && rm -rf {loot_dir}/output/zombies/* && rm -rf {loot_dir}/netkb.csv && rm -rf {loot_dir}/livestatus.csv && rm -rf {loot_dir}/archives/*
-            """
-            result = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = result.communicate()
+            # Clear logs (global), stolen data, scan results, zombies - but NOT credentials
+            loot_dir = os.path.realpath(self.shared_data.loot_dir)
+            dirs_to_clear = [
+                os.path.realpath(self.shared_data.logsdir),
+                os.path.join(loot_dir, 'output', 'data_stolen'),
+                os.path.join(loot_dir, 'output', 'scan_results'),
+                os.path.join(loot_dir, 'output', 'vulnerabilities'),
+                os.path.join(loot_dir, 'output', 'zombies'),
+                os.path.join(loot_dir, 'archives'),
+            ]
+            files_to_remove = [
+                os.path.join(loot_dir, 'netkb.csv'),
+                os.path.join(loot_dir, 'livestatus.csv'),
+            ]
+            import shutil
+            for d in dirs_to_clear:
+                if os.path.isdir(d):
+                    shutil.rmtree(d, ignore_errors=True)
+                    os.makedirs(d, exist_ok=True)
+            for f in files_to_remove:
+                if os.path.isfile(f):
+                    os.remove(f)
 
-            if result.returncode == 0:
+            if True:
                 handler.send_response(200)
                 handler.send_header("Content-type", "application/json")
                 handler.end_headers()
@@ -1684,15 +1777,26 @@ class WebUtils:
 
     def clear_files_light(self, handler):
         try:
-            # Light cleanup - only logs and scan results, NOT credentials or stolen data
-            loot_dir = self.shared_data.loot_dir
-            command = f"""
-            rm -rf {loot_dir}/logs/* && rm -rf {loot_dir}/output/scan_results/* && rm -rf {loot_dir}/netkb.csv && rm -rf {loot_dir}/livestatus.csv
-            """
-            result = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = result.communicate()
+            # Light cleanup - only logs (global) and scan results, NOT credentials or stolen data
+            loot_dir = os.path.realpath(self.shared_data.loot_dir)
+            dirs_to_clear = [
+                os.path.realpath(self.shared_data.logsdir),
+                os.path.join(loot_dir, 'output', 'scan_results'),
+            ]
+            files_to_remove = [
+                os.path.join(loot_dir, 'netkb.csv'),
+                os.path.join(loot_dir, 'livestatus.csv'),
+            ]
+            import shutil
+            for d in dirs_to_clear:
+                if os.path.isdir(d):
+                    shutil.rmtree(d, ignore_errors=True)
+                    os.makedirs(d, exist_ok=True)
+            for f in files_to_remove:
+                if os.path.isfile(f):
+                    os.remove(f)
 
-            if result.returncode == 0:
+            if True:
                 handler.send_response(200)
                 handler.send_header("Content-type", "application/json")
                 handler.end_headers()
@@ -1808,8 +1912,7 @@ class WebUtils:
 
     def reboot_system(self, handler):
         try:
-            command = "sudo reboot"
-            subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.Popen(['reboot'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             handler.send_response(200)
             handler.send_header("Content-type", "application/json")
             handler.end_headers()
@@ -1822,8 +1925,7 @@ class WebUtils:
 
     def shutdown_system(self, handler):
         try:
-            command = "sudo shutdown now"
-            subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.Popen(['shutdown', 'now'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             handler.send_response(200)
             handler.send_header("Content-type", "application/json")
             handler.end_headers()
@@ -1836,8 +1938,7 @@ class WebUtils:
 
     def restart_loki_service(self, handler):
         try:
-            command = "sudo systemctl restart loki.service"
-            subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.Popen(['/etc/init.d/pineapplepager', 'restart'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             handler.send_response(200)
             handler.send_header("Content-type", "application/json")
             handler.end_headers()
@@ -2160,8 +2261,22 @@ method=auto
 
     def download_file(self, handler):
         try:
-            query = unquote(handler.path.split('?path=')[1])
-            file_path = os.path.join(self.shared_data.datastolendir, query)
+            parts = handler.path.split('?path=', 1)
+            if len(parts) < 2 or not parts[1]:
+                handler.send_response(400)
+                handler.send_header("Content-type", "application/json")
+                handler.end_headers()
+                handler.wfile.write(b'{"error":"Missing path parameter"}')
+                return
+            query = unquote(parts[1])
+            file_path = os.path.realpath(os.path.join(self.shared_data.datastolendir, query))
+            # Prevent path traversal
+            if not file_path.startswith(os.path.realpath(self.shared_data.datastolendir)):
+                handler.send_response(403)
+                handler.send_header("Content-type", "application/json")
+                handler.end_headers()
+                handler.wfile.write(b'{"error":"Forbidden"}')
+                return
             if os.path.isfile(file_path):
                 handler.send_response(200)
                 handler.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(file_path)}"')
@@ -2170,7 +2285,9 @@ method=auto
                     handler.wfile.write(file.read())
             else:
                 handler.send_response(404)
+                handler.send_header("Content-type", "application/json")
                 handler.end_headers()
+                handler.wfile.write(b'{"error":"Not found"}')
         except Exception as e:
             handler.send_response(500)
             handler.send_header("Content-type", "application/json")
@@ -2296,7 +2413,14 @@ method=auto
     def download_log(self, handler):
         """Download a specific log file."""
         try:
-            query = unquote(handler.path.split('?name=')[1])
+            parts = handler.path.split('?name=', 1)
+            if len(parts) < 2 or not parts[1]:
+                handler.send_response(400)
+                handler.send_header("Content-type", "application/json")
+                handler.end_headers()
+                handler.wfile.write(b'{"error":"Missing name parameter"}')
+                return
+            query = unquote(parts[1])
             # Vuln result files use "vuln:" prefix to distinguish from log files
             if query.startswith('vuln:'):
                 filename = os.path.basename(query[5:])
@@ -2313,7 +2437,9 @@ method=auto
                     handler.wfile.write(file.read())
             else:
                 handler.send_response(404)
+                handler.send_header("Content-type", "application/json")
                 handler.end_headers()
+                handler.wfile.write(b'{"error":"Not found"}')
         except Exception as e:
             handler.send_response(500)
             handler.send_header("Content-type", "application/json")

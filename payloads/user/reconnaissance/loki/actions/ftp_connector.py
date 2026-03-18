@@ -66,15 +66,14 @@ class FTPConnector:
         self.shared_data = shared_data
         self.scan = self._load_csv_filtered(shared_data.netkbfile, "21")
 
-        self.users = open(shared_data.usersfile, "r").read().splitlines()
-        self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+        with open(shared_data.usersfile, "r") as f:
+            self.users = f.read().splitlines()
+        with open(shared_data.passwordsfile, "r") as f:
+            self.passwords = f.read().splitlines()
 
         self.lock = threading.Lock()
-        self.ftpfile = shared_data.ftpfile
-        if not os.path.exists(self.ftpfile):
-            logger.debug(f"Creating {self.ftpfile}")
-            with open(self.ftpfile, "w") as f:
-                f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
+        # Credential file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.results = []
         self.queue = Queue()
         self.progress_lock = threading.Lock()
@@ -119,7 +118,7 @@ class FTPConnector:
             conn.quit()
             logger.info(f"FTP server {adresse_ip} accepts any credentials - anonymous access")
             return True, "anonymous"
-        except:
+        except Exception:
             pass
 
         # Try standard anonymous logins
@@ -137,7 +136,7 @@ class FTPConnector:
                 conn.quit()
                 logger.info(f"FTP server {adresse_ip} allows anonymous access with {user}")
                 return True, user
-            except:
+            except Exception:
                 pass
 
         return False, None
@@ -276,10 +275,10 @@ class FTPConnector:
         Saves the results of successful FTP connections to a CSV file.
         """
         # Ensure file exists with header
-        if not os.path.exists(self.ftpfile):
-            with open(self.ftpfile, 'w', newline='') as f:
+        if not os.path.exists(self.shared_data.ftpfile):
+            with open(self.shared_data.ftpfile, 'w', newline='') as f:
                 f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
-        with open(self.ftpfile, 'a', newline='') as f:
+        with open(self.shared_data.ftpfile, 'a', newline='') as f:
             writer = csv.writer(f)
             for row in self.results:
                 writer.writerow(row)
@@ -291,8 +290,8 @@ class FTPConnector:
         """
         rows = []
         header = None
-        if os.path.exists(self.ftpfile):
-            with open(self.ftpfile, 'r', newline='') as f:
+        if os.path.exists(self.shared_data.ftpfile):
+            with open(self.shared_data.ftpfile, 'r', newline='') as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 seen = set()
@@ -302,7 +301,7 @@ class FTPConnector:
                         seen.add(key)
                         rows.append(row)
 
-        with open(self.ftpfile, 'w', newline='') as f:
+        with open(self.shared_data.ftpfile, 'w', newline='') as f:
             writer = csv.writer(f)
             if header:
                 writer.writerow(header)

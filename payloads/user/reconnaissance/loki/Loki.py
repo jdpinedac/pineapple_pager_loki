@@ -28,10 +28,9 @@ import threading
 import signal
 import logging
 import time
-import sys
 import subprocess
 from init_shared import shared_data
-from display import Display, handle_exit_display
+from display import Display
 from comment import Commentaireia
 from orchestrator import Orchestrator
 from logger import Logger
@@ -86,6 +85,7 @@ class Loki:
                     self.shared_data.manual_mode = False
                     self.orchestrator = Orchestrator()
                     self.orchestrator_thread = threading.Thread(target=self.orchestrator.run)
+                    self.orchestrator_thread.daemon = True  # Allow clean exit even if stuck in action
                     self.orchestrator_thread.start()
                     logger.info("Orchestrator thread started, automatic mode activated.")
                 else:
@@ -100,8 +100,11 @@ class Loki:
         if self.orchestrator_thread is not None and self.orchestrator_thread.is_alive():
             logger.info("Stopping Orchestrator thread...")
             self.shared_data.orchestrator_should_exit = True
-            self.orchestrator_thread.join()
-            logger.info("Orchestrator thread stopped.")
+            self.orchestrator_thread.join(timeout=15)
+            if self.orchestrator_thread.is_alive():
+                logger.warning("Orchestrator thread did not stop in time (daemon will be killed on exit)")
+            else:
+                logger.info("Orchestrator thread stopped.")
             self.shared_data.lokiorch_status = "IDLE"
             self.shared_data.lokistatustext2 = ""
             self.shared_data.manual_mode = True
@@ -130,13 +133,13 @@ class Loki:
     
     @staticmethod
     def start_display():
-        """Start the display thread"""
+        """Start the display thread. Returns (display_instance, display_thread)."""
         display = Display(shared_data)
         display_thread = threading.Thread(target=display.run)
         display_thread.start()
-        return display_thread
+        return display, display_thread
 
-def handle_exit(sig, frame, display_thread, loki_thread, web_thread=None):
+def handle_exit(sig, frame, display_instance, display_thread, loki_thread, web_thread=None):
     """Handles the termination of the main, display, and web threads."""
     shared_data.should_exit = True
     shared_data.orchestrator_should_exit = True  # Ensure orchestrator stops
@@ -147,20 +150,23 @@ def handle_exit(sig, frame, display_thread, loki_thread, web_thread=None):
         subprocess.run(['killall', 'nmap'], capture_output=True, timeout=5)
     except Exception:
         pass
-    handle_exit_display(sig, frame, display_thread)
+    if display_instance:
+        display_instance.cleanup()
     if display_thread.is_alive():
-        display_thread.join()
+        display_thread.join(timeout=5)
     if loki_thread.is_alive():
-        loki_thread.join()
+        loki_thread.join(timeout=5)
     if web_thread and web_thread.is_alive():
-        web_thread.join()
+        web_thread.join(timeout=5)
     logger.info("Main loop finished. Clean exit.")
-    sys.exit(0)  # Used sys.exit(0) instead of exit(0)
+    os._exit(shared_data.exit_code)
 
 
 
 if __name__ == "__main__":
     logger.debug("Starting threads")
+
+    display_instance = None
 
     try:
         logger.debug("Loading shared data config...")
@@ -168,7 +174,7 @@ if __name__ == "__main__":
 
         logger.info("Starting display thread...")
         shared_data.display_should_exit = False  # Initialize display should_exit
-        display_thread = Loki.start_display()
+        display_instance, display_thread = Loki.start_display()
 
         logger.info("Starting Loki thread...")
         loki = Loki(shared_data)
@@ -186,10 +192,32 @@ if __name__ == "__main__":
             logger.info("Web server disabled by menu setting")
             web_thread = None
 
-        signal.signal(signal.SIGINT, lambda sig, frame: handle_exit(sig, frame, display_thread, loki_thread, web_thread))
-        signal.signal(signal.SIGTERM, lambda sig, frame: handle_exit(sig, frame, display_thread, loki_thread, web_thread))
+        signal.signal(signal.SIGINT, lambda sig, frame: handle_exit(sig, frame, display_instance, display_thread, loki_thread, web_thread))
+        signal.signal(signal.SIGTERM, lambda sig, frame: handle_exit(sig, frame, display_instance, display_thread, loki_thread, web_thread))
+
+        # Wait for display thread to finish (user chose exit from pause menu)
+        display_thread.join()
+
+        # Display exited — initiate graceful shutdown of remaining threads
+        logger.info(f"Display exited, shutting down (exit_code={shared_data.exit_code})...")
+        shared_data.should_exit = True
+        shared_data.orchestrator_should_exit = True
+        shared_data.webapp_should_exit = True
+        # Kill any running nmap subprocesses
+        try:
+            subprocess.run(['killall', 'nmap'], capture_output=True, timeout=5)
+        except Exception:
+            pass
+        loki_thread.join(timeout=10)
+        if web_thread and web_thread.is_alive():
+            web_thread.join(timeout=5)
+        logger.info("All threads stopped. Clean exit.")
+        # Use os._exit() to force termination regardless of any lingering threads
+        # (e.g. orchestrator stuck in nmap scan or brute force network timeout)
+        os._exit(shared_data.exit_code)
 
     except Exception as e:
         logger.error(f"An exception occurred during thread start: {e}")
-        handle_exit_display(signal.SIGINT, None)
+        if display_instance:
+            display_instance.cleanup()
         exit(1)

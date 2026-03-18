@@ -72,16 +72,14 @@ class TelnetConnector:
         self.shared_data = shared_data
         self.scan = self._load_csv_filtered(shared_data.netkbfile, "23")
 
-        self.users = open(shared_data.usersfile, "r").read().splitlines()
-        self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+        with open(shared_data.usersfile, "r") as f:
+            self.users = f.read().splitlines()
+        with open(shared_data.passwordsfile, "r") as f:
+            self.passwords = f.read().splitlines()
 
         self.lock = threading.Lock()
-        self.telnetfile = shared_data.telnetfile
-        # If the file does not exist, it will be created
-        if not os.path.exists(self.telnetfile):
-            logger.debug(f"Creating {self.telnetfile}")
-            with open(self.telnetfile, "w") as f:
-                f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
+        # Credential file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.results = []  # List to store results temporarily
         self.queue = Queue()
         self.progress_lock = threading.Lock()
@@ -132,7 +130,7 @@ class TelnetConnector:
             # If garbage creds get a shell, no real auth required
             if response[0] == 2 or response[0] == 3:
                 return True
-        except:
+        except Exception:
             pass
         return False
 
@@ -286,10 +284,10 @@ class TelnetConnector:
         Save the results of successful login attempts to a CSV file.
         """
         # Ensure file exists with header
-        if not os.path.exists(self.telnetfile):
-            with open(self.telnetfile, 'w', newline='') as f:
+        if not os.path.exists(self.shared_data.telnetfile):
+            with open(self.shared_data.telnetfile, 'w', newline='') as f:
                 f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
-        with open(self.telnetfile, 'a', newline='') as f:
+        with open(self.shared_data.telnetfile, 'a', newline='') as f:
             writer = csv.writer(f)
             for row in self.results:
                 writer.writerow(row)
@@ -301,8 +299,8 @@ class TelnetConnector:
         """
         rows = []
         header = None
-        if os.path.exists(self.telnetfile):
-            with open(self.telnetfile, 'r', newline='') as f:
+        if os.path.exists(self.shared_data.telnetfile):
+            with open(self.shared_data.telnetfile, 'r', newline='') as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 seen = set()
@@ -312,7 +310,7 @@ class TelnetConnector:
                         seen.add(key)
                         rows.append(row)
 
-        with open(self.telnetfile, 'w', newline='') as f:
+        with open(self.shared_data.telnetfile, 'w', newline='') as f:
             writer = csv.writer(f)
             if header:
                 writer.writerow(header)

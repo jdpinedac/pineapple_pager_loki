@@ -37,6 +37,9 @@ const App = {
         // Load theme before first tab switch
         this.loadTheme();
 
+        // Fetch initial network badge
+        this.updateNetworkBadge();
+
         // Restore last tab or use hash or default to dashboard
         var hash = this.resolveTabName(location.hash.slice(1));
         saved = localStorage.getItem('bjorn_active_tab');
@@ -108,7 +111,13 @@ const App = {
 
     async api(url, opts) {
         try {
-            const resp = await fetch(url, opts || {});
+            opts = opts || {};
+            // Inject API auth token if available
+            if (window.LOKI_API_TOKEN) {
+                opts.headers = opts.headers || {};
+                opts.headers['Authorization'] = 'Bearer ' + window.LOKI_API_TOKEN;
+            }
+            const resp = await fetch(url, opts);
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const ct = resp.headers.get('content-type') || '';
             if (ct.includes('json')) return resp.json();
@@ -125,6 +134,21 @@ const App = {
             headers: data ? { 'Content-Type': 'application/json' } : {},
             body: data ? JSON.stringify(data) : undefined
         });
+    },
+
+    async postWithFeedback(url, data, btn) {
+        var origText = btn ? btn.textContent : null;
+        try {
+            if (btn) { btn.disabled = true; btn.textContent = '...'; }
+            var result = await this.post(url, data);
+            this.toast(result.message || 'Done', 'success');
+            return result;
+        } catch (e) {
+            this.toast('Error: ' + e.message, 'error');
+            throw e;
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = origText; }
+        }
     },
 
     toast(msg, type) {
@@ -240,6 +264,19 @@ const App = {
             }
         } catch (e) {
             console.error('Failed to load theme:', e);
+        }
+    },
+
+    async updateNetworkBadge() {
+        try {
+            var data = await this.api('/api/stats');
+            var badge = document.getElementById('network-badge');
+            if (badge && data.current_network) {
+                badge.textContent = data.current_network;
+                badge.title = 'Active network: ' + data.current_network;
+            }
+        } catch (e) {
+            // Silent
         }
     }
 };

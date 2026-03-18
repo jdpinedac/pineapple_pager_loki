@@ -24,8 +24,7 @@ TTF_LARGE = 24.0
 # Loot directory paths
 LOOT_DIR = "/mmc/root/loot/loki"
 LOGS_DIR = os.path.join(LOOT_DIR, "logs")
-CREDS_DIR = os.path.join(LOOT_DIR, "output", "crackedpwd")
-STOLEN_DIR = os.path.join(LOOT_DIR, "output", "data_stolen")
+NETWORKS_DIR = os.path.join(LOOT_DIR, "networks")
 
 from pagerctl import Pager
 
@@ -692,60 +691,64 @@ class LokiMenu:
         self._show_message("Logs Cleared!", ON_COLOR)
         time.sleep(0.5)
 
+    def _get_network_dirs(self):
+        """Get list of per-network loot directories."""
+        if not os.path.isdir(NETWORKS_DIR):
+            return []
+        return [os.path.join(NETWORKS_DIR, d) for d in os.listdir(NETWORKS_DIR)
+                if os.path.isdir(os.path.join(NETWORKS_DIR, d))]
+
     def _clear_credentials(self):
-        """Clear credential files."""
-        try:
-            for f in os.listdir(CREDS_DIR):
-                if f.endswith('.csv'):
-                    os.remove(os.path.join(CREDS_DIR, f))
-        except Exception:
-            pass
+        """Clear credential files across all networks."""
+        for net_dir in self._get_network_dirs():
+            creds_dir = os.path.join(net_dir, 'output', 'crackedpwd')
+            try:
+                for f in os.listdir(creds_dir):
+                    if f.endswith('.csv'):
+                        os.remove(os.path.join(creds_dir, f))
+            except Exception:
+                pass
         self._show_message("Credentials Cleared!", ON_COLOR)
         time.sleep(0.5)
 
     def _clear_stolen(self):
-        """Clear stolen data files."""
-        try:
-            subprocess.run(['rm', '-rf', STOLEN_DIR], timeout=5)
-            os.makedirs(STOLEN_DIR, exist_ok=True)
-        except Exception:
-            pass
+        """Clear stolen data files across all networks."""
+        for net_dir in self._get_network_dirs():
+            stolen_dir = os.path.join(net_dir, 'output', 'data_stolen')
+            try:
+                subprocess.run(['rm', '-rf', stolen_dir], timeout=5)
+                os.makedirs(stolen_dir, exist_ok=True)
+            except Exception:
+                pass
         self._show_message("Stolen Data Cleared!", ON_COLOR)
         time.sleep(0.5)
 
     def _clear_all(self):
-        """Clear all Loki data."""
-        # Each step independent so one failure doesn't skip the rest
+        """Clear all Loki data across all networks."""
+        # Clear global logs
         try:
             subprocess.run(['rm', '-rf', LOGS_DIR], timeout=5)
             os.makedirs(LOGS_DIR, exist_ok=True)
         except Exception:
             pass
-        try:
-            for f in os.listdir(CREDS_DIR):
-                if f.endswith('.csv'):
-                    os.remove(os.path.join(CREDS_DIR, f))
-        except Exception:
-            pass
-        try:
-            subprocess.run(['rm', '-rf', STOLEN_DIR], timeout=5)
-            os.makedirs(STOLEN_DIR, exist_ok=True)
-        except Exception:
-            pass
-        for name in ['netkb.csv', 'livestatus.csv']:
-            try:
-                path = os.path.join(LOOT_DIR, name)
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
-        for subdir in ['output/scan_results', 'output/vulnerabilities', 'output/zombies', 'archives']:
-            try:
-                path = os.path.join(LOOT_DIR, subdir)
-                subprocess.run(['rm', '-rf', path], timeout=5)
-                os.makedirs(path, exist_ok=True)
-            except Exception:
-                pass
+        # Clear per-network data
+        for net_dir in self._get_network_dirs():
+            for f in ['netkb.csv', 'livestatus.csv']:
+                try:
+                    path = os.path.join(net_dir, f)
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
+            for subdir in ['output/crackedpwd', 'output/data_stolen',
+                           'output/scan_results', 'output/vulnerabilities',
+                           'output/zombies', 'archives']:
+                try:
+                    path = os.path.join(net_dir, subdir)
+                    subprocess.run(['rm', '-rf', path], timeout=5)
+                    os.makedirs(path, exist_ok=True)
+                except Exception:
+                    pass
         self._show_message("All Data Cleared!", ON_COLOR)
         time.sleep(0.5)
 

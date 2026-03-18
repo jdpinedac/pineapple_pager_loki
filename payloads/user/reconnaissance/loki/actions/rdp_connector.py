@@ -74,16 +74,14 @@ class RDPConnector:
         self.shared_data = shared_data
         self.scan = self._load_csv_filtered(shared_data.netkbfile, "3389")
 
-        self.users = open(shared_data.usersfile, "r").read().splitlines()
-        self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+        with open(shared_data.usersfile, "r") as f:
+            self.users = f.read().splitlines()
+        with open(shared_data.passwordsfile, "r") as f:
+            self.passwords = f.read().splitlines()
 
         self.lock = threading.Lock()
-        self.rdpfile = shared_data.rdpfile
-        # If the file doesn't exist, it will be created
-        if not os.path.exists(self.rdpfile):
-            logger.debug(f"Creating {self.rdpfile}")
-            with open(self.rdpfile, "w") as f:
-                f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
+        # Credential file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.results = []  # List to store results temporarily
         self.queue = Queue()
         self.progress_lock = threading.Lock()
@@ -143,7 +141,7 @@ class RDPConnector:
         # Use random invalid credentials to test if auth is disabled
         command = f"{env_prefix}{sfreerdp_path} /v:{adresse_ip} /u:__noauth_test__ /p:__invalid__ /cert:ignore +auth-only"
         try:
-            stdout, stderr, returncode = subprocess_with_timeout(command, timeout=15)
+            stdout, stderr, returncode = subprocess_with_timeout(command, timeout=15, shell=True)
             # If garbage credentials succeed, no auth is required
             return self._check_rdp_auth_success(stdout, stderr, returncode)
         except TimeoutError:
@@ -190,7 +188,7 @@ class RDPConnector:
         sfreerdp_path, env_prefix = self._get_sfreerdp_env()
         command = f"{env_prefix}{sfreerdp_path} /v:{adresse_ip} /u:{user} /p:{password} /cert:ignore +auth-only"
         try:
-            stdout, stderr, returncode = subprocess_with_timeout(command, timeout=15)
+            stdout, stderr, returncode = subprocess_with_timeout(command, timeout=15, shell=True)
             result = self._check_rdp_auth_success(stdout, stderr, returncode)
             if result:
                 logger.info(f"RDP auth SUCCESS for {user}:{password} rc={returncode}")
@@ -326,10 +324,10 @@ class RDPConnector:
         Save the results of successful connection attempts to a CSV file.
         """
         # Ensure file exists with header
-        if not os.path.exists(self.rdpfile):
-            with open(self.rdpfile, 'w', newline='') as f:
+        if not os.path.exists(self.shared_data.rdpfile):
+            with open(self.shared_data.rdpfile, 'w', newline='') as f:
                 f.write("MAC Address,IP Address,Hostname,User,Password,Port\n")
-        with open(self.rdpfile, 'a', newline='') as f:
+        with open(self.shared_data.rdpfile, 'a', newline='') as f:
             writer = csv.writer(f)
             for row in self.results:
                 writer.writerow(row)
@@ -341,8 +339,8 @@ class RDPConnector:
         """
         rows = []
         header = None
-        if os.path.exists(self.rdpfile):
-            with open(self.rdpfile, 'r', newline='') as f:
+        if os.path.exists(self.shared_data.rdpfile):
+            with open(self.shared_data.rdpfile, 'r', newline='') as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 seen = set()
@@ -352,7 +350,7 @@ class RDPConnector:
                         seen.add(key)
                         rows.append(row)
 
-        with open(self.rdpfile, 'w', newline='') as f:
+        with open(self.shared_data.rdpfile, 'w', newline='') as f:
             writer = csv.writer(f)
             if header:
                 writer.writerow(header)

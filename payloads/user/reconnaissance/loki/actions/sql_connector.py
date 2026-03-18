@@ -67,14 +67,14 @@ class SQLConnector:
     def __init__(self, shared_data):
         self.shared_data = shared_data
         self.load_scan_file()
-        self.users = open(shared_data.usersfile, "r").read().splitlines()
-        self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+        with open(shared_data.usersfile, "r") as f:
+            self.users = f.read().splitlines()
+        with open(shared_data.passwordsfile, "r") as f:
+            self.passwords = f.read().splitlines()
 
         self.lock = threading.Lock()
-        self.sqlfile = shared_data.sqlfile
-        if not os.path.exists(self.sqlfile):
-            with open(self.sqlfile, "w") as f:
-                f.write("MAC Address,IP Address,Hostname,User,Password,Port,Database\n")
+        # Credential file path is read dynamically from shared_data
+        # (changes when switching networks)
         self.results = []
         self.queue = Queue()
         self.progress_lock = threading.Lock()
@@ -242,7 +242,7 @@ class SQLConnector:
         """
         Save the results of successful connection attempts to a CSV file.
         """
-        with open(self.sqlfile, 'a', newline='') as f:
+        with open(self.shared_data.sqlfile, 'a', newline='') as f:
             writer = csv.writer(f)
             for row in self.results:
                 writer.writerow(row)
@@ -255,8 +255,8 @@ class SQLConnector:
         """
         rows = []
         header = None
-        if os.path.exists(self.sqlfile):
-            with open(self.sqlfile, 'r', newline='') as f:
+        if os.path.exists(self.shared_data.sqlfile):
+            with open(self.shared_data.sqlfile, 'r', newline='') as f:
                 reader = csv.reader(f)
                 header = next(reader, None)
                 seen = set()
@@ -266,7 +266,7 @@ class SQLConnector:
                         seen.add(key)
                         rows.append(row)
 
-        with open(self.sqlfile, 'w', newline='') as f:
+        with open(self.shared_data.sqlfile, 'w', newline='') as f:
             writer = csv.writer(f)
             if header:
                 writer.writerow(header)
